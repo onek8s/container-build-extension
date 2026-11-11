@@ -1,0 +1,5 @@
+node_modules/
+dist-azure/
+*.vsix
+azure/tasks/ContainerBuild/index.js
+coverage/

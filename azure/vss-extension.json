@@ -1,0 +1,54 @@
+{
+  "manifestVersion": 1,
+  "id": "container-build",
+  "name": "Container Build",
+  "version": "1.0.0",
+  "publisher": "onek8s",
+  "description": "Build a container image, scan it with Trivy and push it to a registry - with minimal configuration.",
+  "public": false,
+  "categories": [
+    "Azure Pipelines"
+  ],
+  "targets": [
+    {
+      "id": "Microsoft.VisualStudio.Services"
+    }
+  ],
+  "tags": [
+    "docker",
+    "container",
+    "build",
+    "trivy",
+    "security",
+    "acr"
+  ],
+  "content": {
+    "details": {
+      "path": "overview.md"
+    },
+    "license": {
+      "path": "LICENSE"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "uri": "https://github.com/onek8s/container-build-extension"
+  },
+  "files": [
+    {
+      "path": "tasks/ContainerBuild"
+    }
+  ],
+  "contributions": [
+    {
+      "id": "container-build-task",
+      "type": "ms.vss-distributed-task.task",
+      "targets": [
+        "ms.vss-distributed-task.tasks"
+      ],
+      "properties": {
+        "name": "tasks/ContainerBuild"
+      }
+    }
+  ]
+}

@@ -1,0 +1,137 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - name: Check bundled files are up to date
+        run: |
+          if [ -n "$(git status --porcelain dist azure)" ]; then
+            git status --porcelain dist azure
+            git diff dist azure | head -50
+            echo "::error::dist/ or azure/ is out of date. Run 'npm run build' and commit the result."
+            exit 1
+          fi
+      - name: Package Azure DevOps extension
+        run: npx tfx extension create --root azure --manifest-globs vss-extension.json --output-path dist-azure
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vsix
+          path: dist-azure/*.vsix
+
+  e2e-github:
+    needs: check
+    runs-on: ubuntu-latest
+    services:
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build, scan and push
+        id: build
+        uses: ./
+        with:
+          image: localhost:5000/e2e/app
+          context: test/fixtures/app
+          push: "true"
+
+      - name: Verify outputs and registry
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_REF: ${{ steps.build.outputs.image-ref }}
+          TAGS: ${{ steps.build.outputs.tags }}
+          VULNS: ${{ steps.build.outputs.vulnerabilities }}
+        run: |
+          set -eu
+          echo "digest=$DIGEST image-ref=$IMAGE_REF tags=$TAGS vulnerabilities=$VULNS"
+          [[ "$DIGEST" == sha256:* ]]
+          [[ "$IMAGE_REF" == "localhost:5000/e2e/app@$DIGEST" ]]
+          [[ "$VULNS" == "0" ]]
+          short=$(echo "$GITHUB_SHA" | cut -c1-7)
+          curl -sf localhost:5000/v2/e2e/app/tags/list | tee /dev/stderr | grep -q "\"$short\""
+          docker pull "$IMAGE_REF"
+
+      - name: Vulnerable image must not be pushed
+        id: vulnerable
+        continue-on-error: true
+        uses: ./
+        with:
+          image: localhost:5000/e2e/vulnerable
+          context: test/fixtures/vulnerable
+          push: "true"
+
+      - name: Verify vulnerable image was blocked
+        env:
+          OUTCOME: ${{ steps.vulnerable.outcome }}
+          VULNS: ${{ steps.vulnerable.outputs.vulnerabilities }}
+        run: |
+          set -eu
+          echo "outcome=$OUTCOME vulnerabilities=$VULNS"
+          [[ "$OUTCOME" == "failure" ]]
+          [[ "$VULNS" -gt 0 ]]
+          ! curl -sf localhost:5000/v2/e2e/vulnerable/tags/list
+
+  e2e-azure:
+    # Runs the bundled Azure DevOps task with the environment the Azure Pipelines agent provides,
+    # including a username/password service connection against an authenticated registry.
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci && npm run build
+      - name: Start authenticated registry
+        run: |
+          mkdir -p "$RUNNER_TEMP/auth"
+          docker run --rm --entrypoint htpasswd httpd:2 -Bbn tester s3cret > "$RUNNER_TEMP/auth/htpasswd"
+          docker run -d -p 5001:5000 -v "$RUNNER_TEMP/auth:/auth" \
+            -e REGISTRY_AUTH=htpasswd -e REGISTRY_AUTH_HTPASSWD_REALM=e2e -e REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd \
+            registry:2
+          sleep 3
+      - name: Run Azure task
+        env:
+          INPUT_IMAGE: localhost:5001/e2e/azure-app
+          INPUT_CONTEXT: test/fixtures/app
+          INPUT_CONTAINERREGISTRY: 11111111-2222-3333-4444-555555555555
+          ENDPOINT_AUTH_SCHEME_11111111-2222-3333-4444-555555555555: UsernamePassword
+          ENDPOINT_AUTH_PARAMETER_11111111-2222-3333-4444-555555555555_USERNAME: tester
+          ENDPOINT_AUTH_PARAMETER_11111111-2222-3333-4444-555555555555_PASSWORD: s3cret
+          ENDPOINT_AUTH_PARAMETER_11111111-2222-3333-4444-555555555555_REGISTRY: localhost:5001
+          BUILD_SOURCEVERSION: ${{ github.sha }}
+          BUILD_SOURCEBRANCH: refs/tags/v9.8.7
+          BUILD_REASON: Manual
+          BUILD_SOURCESDIRECTORY: ${{ github.workspace }}
+          AGENT_TEMPDIRECTORY: ${{ runner.temp }}
+        run: |
+          set -o pipefail
+          node azure/tasks/ContainerBuild/index.js | tee "$RUNNER_TEMP/azure.log"
+      - name: Verify
+        run: |
+          set -eu
+          grep -q '##vso\[task.setvariable variable=digest;isOutput=true\]sha256:' "$RUNNER_TEMP/azure.log"
+          tags=$(curl -sf -u tester:s3cret localhost:5001/v2/e2e/azure-app/tags/list)
+          echo "$tags"
+          echo "$tags" | grep -q '"v9.8.7"'
+          echo "$tags" | grep -q '"9.8.7"'

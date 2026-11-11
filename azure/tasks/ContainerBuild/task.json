@@ -1,0 +1,175 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Microsoft/azure-pipelines-task-lib/master/tasks.schema.json",
+  "id": "2eba6bc5-532b-4fb5-a4cf-235492c1d423",
+  "name": "ContainerBuild",
+  "friendlyName": "Container Build",
+  "description": "Build a container image, scan it for vulnerabilities with Trivy and push it to a registry.",
+  "helpMarkDown": "[Documentation](https://github.com/onek8s/container-build-extension)",
+  "category": "Build",
+  "author": "OneK8s",
+  "version": {
+    "Major": 1,
+    "Minor": 0,
+    "Patch": 0
+  },
+  "minimumAgentVersion": "3.232.1",
+  "instanceNameFormat": "Container build $(image)",
+  "groups": [
+    {
+      "name": "build",
+      "displayName": "Build",
+      "isExpanded": false
+    },
+    {
+      "name": "scan",
+      "displayName": "Security scan",
+      "isExpanded": false
+    }
+  ],
+  "inputs": [
+    {
+      "name": "image",
+      "type": "string",
+      "label": "Image",
+      "required": true,
+      "helpMarkDown": "Image name including registry, e.g. `myacr.azurecr.io/app`."
+    },
+    {
+      "name": "containerRegistry",
+      "type": "connectedService:dockerregistry",
+      "label": "Container registry service connection",
+      "required": false,
+      "helpMarkDown": "Docker Registry service connection used for push. Leave empty if already logged in."
+    },
+    {
+      "name": "tags",
+      "type": "multiLine",
+      "label": "Tags",
+      "required": false,
+      "helpMarkDown": "Comma or newline separated tags. Default: short commit SHA plus `latest` (main/master), branch name, `pr-<n>` or git tag."
+    },
+    {
+      "name": "push",
+      "type": "pickList",
+      "label": "Push",
+      "defaultValue": "auto",
+      "required": false,
+      "options": {
+        "auto": "Auto (push except for pull requests)",
+        "true": "Always",
+        "false": "Never"
+      }
+    },
+    {
+      "name": "context",
+      "type": "string",
+      "label": "Build context",
+      "defaultValue": ".",
+      "required": false,
+      "groupName": "build"
+    },
+    {
+      "name": "dockerfile",
+      "type": "string",
+      "label": "Dockerfile",
+      "required": false,
+      "groupName": "build",
+      "helpMarkDown": "Default: `<context>/Dockerfile`."
+    },
+    {
+      "name": "buildArgs",
+      "type": "multiLine",
+      "label": "Build arguments",
+      "required": false,
+      "groupName": "build",
+      "helpMarkDown": "Newline separated `KEY=VALUE` pairs."
+    },
+    {
+      "name": "target",
+      "type": "string",
+      "label": "Target stage",
+      "required": false,
+      "groupName": "build"
+    },
+    {
+      "name": "scan",
+      "type": "boolean",
+      "label": "Scan image",
+      "defaultValue": "true",
+      "required": false,
+      "groupName": "scan"
+    },
+    {
+      "name": "severity",
+      "type": "string",
+      "label": "Severity",
+      "defaultValue": "CRITICAL,HIGH",
+      "required": false,
+      "groupName": "scan",
+      "visibleRule": "scan = true"
+    },
+    {
+      "name": "failOnVulnerabilities",
+      "type": "boolean",
+      "label": "Fail on vulnerabilities",
+      "defaultValue": "true",
+      "required": false,
+      "groupName": "scan",
+      "visibleRule": "scan = true",
+      "helpMarkDown": "Fail the task and skip push when vulnerabilities are found."
+    },
+    {
+      "name": "ignoreUnfixed",
+      "type": "boolean",
+      "label": "Ignore unfixed vulnerabilities",
+      "defaultValue": "true",
+      "required": false,
+      "groupName": "scan",
+      "visibleRule": "scan = true"
+    },
+    {
+      "name": "trivyVersion",
+      "type": "string",
+      "label": "Trivy version",
+      "required": false,
+      "groupName": "scan",
+      "visibleRule": "scan = true"
+    }
+  ],
+  "outputVariables": [
+    {
+      "name": "image",
+      "description": "Image repository"
+    },
+    {
+      "name": "tags",
+      "description": "Comma separated list of full image references"
+    },
+    {
+      "name": "digest",
+      "description": "Digest of the pushed image"
+    },
+    {
+      "name": "imageRef",
+      "description": "Immutable image reference (image@digest)"
+    },
+    {
+      "name": "vulnerabilities",
+      "description": "Number of vulnerabilities found"
+    },
+    {
+      "name": "scanReport",
+      "description": "Path to the Trivy JSON report"
+    }
+  ],
+  "execution": {
+    "Node20_1": {
+      "target": "index.js",
+      "argumentFormat": ""
+    },
+    "Node24": {
+      "target": "index.js",
+      "argumentFormat": ""
+    }
+  }
+}

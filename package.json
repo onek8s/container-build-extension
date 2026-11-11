@@ -1,0 +1,24 @@
+{
+  "name": "container-build-extension",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Build, scan and push container images. One code base for a GitHub Action and an Azure DevOps extension.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm test && npm run build",
+    "package:azure": "npm run build && tfx extension create --root azure --manifest-globs vss-extension.json --output-path dist-azure"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "esbuild": "^0.25.0",
+    "tfx-cli": "^0.21.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
