@@ -1,0 +1,78 @@
+name: Container Build
+description: Build a container image, scan it for vulnerabilities with Trivy and push it to a registry.
+author: OneK8s
+branding:
+  icon: package
+  color: blue
+
+inputs:
+  image:
+    description: "Image name including registry, e.g. ghcr.io/owner/app or myacr.azurecr.io/app. The only required input."
+    required: true
+  tags:
+    description: "Comma or newline separated tags. Default: short SHA plus 'latest' (main/master), branch name, 'pr-<n>' or git tag."
+    required: false
+  context:
+    description: "Build context directory."
+    required: false
+    default: "."
+  dockerfile:
+    description: "Path to the Dockerfile. Default: <context>/Dockerfile."
+    required: false
+  build-args:
+    description: "Newline separated build arguments (KEY=VALUE)."
+    required: false
+  target:
+    description: "Target build stage."
+    required: false
+  push:
+    description: "'auto' (push except for pull requests), 'true' or 'false'."
+    required: false
+    default: "auto"
+  username:
+    description: "Registry username. Not needed for ghcr.io (uses github-token) or when already logged in."
+    required: false
+  password:
+    description: "Registry password or token."
+    required: false
+  github-token:
+    description: "Token used for ghcr.io when no password is given. Requires 'packages: write' permission."
+    required: false
+    default: ${{ github.token }}
+  scan:
+    description: "Scan the image with Trivy before pushing."
+    required: false
+    default: "true"
+  severity:
+    description: "Comma separated severities to report (UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL)."
+    required: false
+    default: "CRITICAL,HIGH"
+  fail-on-vulnerabilities:
+    description: "Fail (and do not push) when vulnerabilities are found."
+    required: false
+    default: "true"
+  ignore-unfixed:
+    description: "Ignore vulnerabilities that have no fix available."
+    required: false
+    default: "true"
+  trivy-version:
+    description: "Trivy version (or full scanner image reference)."
+    required: false
+
+outputs:
+  image:
+    description: "Image repository, e.g. ghcr.io/owner/app"
+  tags:
+    description: "Comma separated list of full image references that were built"
+  digest:
+    description: "Digest of the pushed image (sha256:...)"
+  image-ref:
+    description: "Immutable image reference (image@digest)"
+  vulnerabilities:
+    description: "Number of vulnerabilities found by the scan"
+  scan-report:
+    description: "Path to the Trivy JSON report"
+
+runs:
+  using: node24
+  main: dist/index.js

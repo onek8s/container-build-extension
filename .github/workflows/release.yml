@@ -1,0 +1,45 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+
+      - name: Verify tag matches package.json version
+        run: |
+          version=$(node -p "require('./package.json').version")
+          [[ "${GITHUB_REF_NAME}" == "v${version}" ]] || { echo "::error::Tag ${GITHUB_REF_NAME} does not match package.json version ${version}"; exit 1; }
+
+      - name: Package Azure DevOps extension
+        run: npx tfx extension create --root azure --manifest-globs vss-extension.json --output-path dist-azure
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist-azure/*.vsix --generate-notes --verify-tag
+
+      - name: Move major version tag
+        run: |
+          major="${GITHUB_REF_NAME%%.*}"
+          git tag -f "$major" "$GITHUB_SHA"
+          git push -f origin "refs/tags/$major"
+
+      - name: Publish to Visual Studio Marketplace
+        env:
+          MARKETPLACE_TOKEN: ${{ secrets.AZURE_DEVOPS_MARKETPLACE_TOKEN }}
+        if: env.MARKETPLACE_TOKEN != ''
+        run: npx tfx extension publish --vsix dist-azure/*.vsix --auth-type pat --token "$MARKETPLACE_TOKEN"
