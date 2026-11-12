@@ -1,5 +1,6 @@
 import * as path from 'node:path';
 import type { Platform } from './platform';
+import type { MachineSettings } from './azure';
 import { resolveImage } from './registry';
 import type { SbomFormat } from './scan';
 
@@ -76,9 +77,9 @@ export function parseImage(image: string): { registry: string; repository: strin
   return { registry: hasRegistry ? first : 'docker.io', repository: ref };
 }
 
-export function readInputs(platform: Platform): Inputs {
+export function readInputs(platform: Platform, machine?: MachineSettings): Inputs {
   const { context: ctx } = platform;
-  const image = resolveImage(platform);
+  const image = resolveImage(platform, machine);
   const { registry, repository } = parseImage(image);
 
   const context = path.resolve(ctx.workspace, platform.getInput('context') ?? '.');

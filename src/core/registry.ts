@@ -1,4 +1,12 @@
-import { acrCredentials, hasManagedIdentity, isAcr, workloadIdentityFromEnv } from './azure';
+import {
+  acrCredentials,
+  hasManagedIdentity,
+  isAcr,
+  machineSettings,
+  TAG_REGISTRY,
+  workloadIdentityFromEnv,
+  type MachineSettings,
+} from './azure';
 import type { Exec } from './exec';
 import type { BuildContext, Platform, RegistryCredentials } from './platform';
 
@@ -52,22 +60,38 @@ export function defaultImagePath(ctx: BuildContext, registry: string): string | 
   return project ? `${project}/${repo}` : repo;
 }
 
-/** Resolves the registry to use: input > CONTAINER_REGISTRY variable > platform default. */
-export function resolveRegistry(platform: Platform): string | undefined {
-  const value = platform.getInput('registry') ?? platform.getVariable(VAR_REGISTRY) ?? platform.getDefaultRegistry();
+/** Registry configured in the pipeline: input > CONTAINER_REGISTRY variable > service connection. */
+export function configuredRegistry(platform: Platform): string | undefined {
+  return platform.getInput('registry') ?? platform.getVariable(VAR_REGISTRY) ?? platform.getDefaultRegistry();
+}
+
+/** True when the image name can only be completed with settings of the machine (VM tags). */
+export function needsMachineSettings(platform: Platform): boolean {
+  const image = platform.getInput('image');
+  return !configuredRegistry(platform) && !(image && hasRegistryHost(image));
+}
+
+/**
+ * Resolves the registry to use: input > CONTAINER_REGISTRY variable > service connection >
+ * `container-registry` tag of the agent VM > platform fallback (ghcr.io on GitHub).
+ */
+export function resolveRegistry(platform: Platform, machine: MachineSettings = {}): string | undefined {
+  const value = configuredRegistry(platform) ?? machine.registry ?? platform.getFallbackRegistry?.();
   return value ? normalizeRegistry(value) : undefined;
 }
 
 /** Resolves the full image name (without tag). */
-export function resolveImage(platform: Platform): string {
+export function resolveImage(platform: Platform, machine: MachineSettings = {}): string {
   const image = platform.getInput('image');
-  const registry = resolveRegistry(platform);
+  const registry = resolveRegistry(platform, machine);
   if (image) {
     if (hasRegistryHost(image) || !registry) return image;
     return `${registry}/${image.replace(/^\/+/, '')}`;
   }
   if (!registry) {
-    throw new Error(`Input 'image' is required when no registry is configured (input 'registry' or variable ${VAR_REGISTRY}).`);
+    throw new Error(
+      `Input 'image' is required when no registry is configured (input 'registry', variable ${VAR_REGISTRY} or tag '${TAG_REGISTRY}' of the agent VM).`,
+    );
   }
   const path = defaultImagePath(platform.context, registry);
   if (!path) throw new Error("Cannot derive the image name from the repository; set input 'image'.");
@@ -120,7 +144,8 @@ export async function resolveCredentials(
     const workload = workloadIdentityFromEnv(opts.env ?? process.env);
     if (workload) return acrCredentials(opts.exec, registry, workload, mask);
     if (await hasManagedIdentity(opts.exec)) {
-      const clientId = platform.getInput('azureClientId') ?? (opts.env ?? process.env).AZURE_CLIENT_ID;
+      const clientId =
+        platform.getInput('azureClientId') ?? (opts.env ?? process.env).AZURE_CLIENT_ID ?? (await machineSettings(opts.exec)).clientId;
       return acrCredentials(opts.exec, registry, { kind: 'managed', source: 'managed identity', clientId }, mask);
     }
   }

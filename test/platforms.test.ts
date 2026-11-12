@@ -39,7 +39,8 @@ describe('GitHubPlatform', () => {
     const p = new GitHubPlatform({ GITHUB_REPOSITORY: 'OneK8s/My_App', CONTAINER_REGISTRY: ' acr.io ' });
     expect(p.context).toMatchObject({ project: 'OneK8s', repository: 'My_App' });
     expect(p.getVariable('CONTAINER_REGISTRY')).toBe('acr.io');
-    expect(p.getDefaultRegistry()).toBe('ghcr.io');
+    expect(p.getDefaultRegistry()).toBeUndefined();
+    expect(p.getFallbackRegistry()).toBe('ghcr.io');
   });
 
   it('uses GitHub OIDC for Azure when client and tenant id are configured', async () => {

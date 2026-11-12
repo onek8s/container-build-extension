@@ -3,14 +3,20 @@
 Build a container image with supply chain protection, generate an SBOM, scan it for vulnerabilities with [Trivy](https://trivy.dev) and push it to a registry, all in one task with minimal configuration.
 
 ```yaml
-variables:
-  - group: container-registry   # CONTAINER_REGISTRY, CONTAINER_REGISTRY_USERNAME, CONTAINER_REGISTRY_PASSWORD
-
 steps:
   - task: ContainerBuild@0
 ```
 
-or, with a Docker Registry service connection:
+On **self-hosted agents** (Managed DevOps Pools, VM scale sets, your own VMs or AKS) that is the whole pipeline. The agent
+provides everything:
+
+- **login**: its managed identity or AKS workload identity, with the AcrPush role on your Azure Container Registry
+- **registry**: the `container-registry` tag of the agent VM (Managed DevOps Pools pass pool tags to the agents), or
+  `CONTAINER_REGISTRY=myacr.azurecr.io` in the agent's environment
+- **image name**: `<registry>/<project>/<repository>`
+
+On **Microsoft-hosted agents**, or to choose per pipeline, use a Docker Registry service connection. This can be Azure
+Container Registry with workload identity federation, or username/password:
 
 ```yaml
 steps:
@@ -19,12 +25,9 @@ steps:
       containerRegistry: my-acr-connection
 ```
 
-Azure Container Registry works without passwords: with a workload identity federation service connection, or on
-self-hosted agents with a managed identity or AKS workload identity. There, setting `CONTAINER_REGISTRY=myacr.azurecr.io`
-in the agent's environment is all it takes.
+You can also set `CONTAINER_REGISTRY`, `CONTAINER_REGISTRY_USERNAME` and `CONTAINER_REGISTRY_PASSWORD` in a variable group.
 
-That's it. Configure the registry once in a variable group or service connection. The image name is derived
-automatically as `<registry>/<project>/<repository>`. The task:
+The task:
 
 1. **Builds** `./Dockerfile` and tags it automatically (short commit SHA, plus `latest` on main/master, the git tag on tag builds, `pr-<n>` for pull requests or the branch name).
    Package installs (`npm`, `yarn`, `pnpm`, `pip`, `uv`, `poetry`, ...) in the Dockerfile run through

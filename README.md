@@ -26,13 +26,14 @@ When `image` is not set, the image name is derived from the source repository:
 |---|---|
 | GitHub | `<registry>/<owner>/<repository>`, e.g. `ghcr.io/onek8s/container-build-extension` |
 | Azure DevOps | `<registry>/<project>/<repository>`, e.g. `myacr.azurecr.io/web-shop/frontend` |
-| Docker Hub | `docker.io/<namespace>/<repository>` (Docker Hub allows only one level) |
+| Docker Hub | `docker.io/<namespace>/<repository>` (Docker Hub allows only one level below the namespace; Azure Container Registry, GHCR and most other registries allow nested paths) |
 
 Names are lower-cased and characters that are not allowed are replaced with `-`. `image` can also be a name below the
 registry (`image: tools/api` → `myacr.azurecr.io/tools/api`) or a full reference (`image: other.io/team/app`).
 
 The registry is the first of: the `registry` input, the `CONTAINER_REGISTRY` variable, the service connection's registry
-(Azure DevOps), or `ghcr.io` (GitHub). It may include a namespace, e.g. `myacr.azurecr.io/team`.
+(Azure DevOps), the `container-registry` tag of the agent VM, or `ghcr.io` (GitHub). It may include a namespace, e.g.
+`myacr.azurecr.io/team`.
 
 ## Configure the registry once
 
@@ -150,16 +151,20 @@ For Azure Container Registry (`*.azurecr.io`) the extension logs in with a Micro
 | 3 | AKS workload identity | agents running in AKS pods with workload identity (`AZURE_FEDERATED_TOKEN_FILE`) | runners in AKS pods (e.g. Actions Runner Controller) |
 | 4 | Managed identity | self-hosted agents on Azure VMs / VM scale sets (`AZURE_CLIENT_ID` selects a user-assigned identity) | self-hosted runners on Azure VMs / VM scale sets |
 
-### Self-hosted agents and runners
+### Self-hosted agents and runners: nothing in the pipeline
 
-With a managed identity or AKS workload identity on the agent pool, configure only the registry, for example in the
-agent's or runner's `.env` file (or as a pipeline / organization variable):
+A self-hosted agent or runner can provide everything itself:
 
-```
-CONTAINER_REGISTRY=myacr.azurecr.io
-```
+- **Login**: its managed identity (Azure VM / VM scale set / Managed DevOps Pool) or AKS workload identity, with AcrPush.
+- **Registry**: one of the following.
+  - The **`container-registry` tag** of the agent VM, read from the instance metadata service with no permissions needed.
+    Works for Managed DevOps Pools (pool tags are passed to the agent VMs), VM scale set agents and runners on Azure VMs.
+    An optional `container-registry-client-id` tag selects the managed identity when the VM has several.
+  - **`CONTAINER_REGISTRY=myacr.azurecr.io` in the agent's environment**: the `.env` file in the Azure Pipelines agent or
+    GitHub runner directory, the system environment, or the pod spec (AKS).
+- **Image name**: derived from the project/owner and repository.
 
-and the pipelines need nothing else:
+Pipelines then need nothing else:
 
 ```yaml
 # Azure Pipelines
@@ -178,8 +183,8 @@ jobs:
       - uses: onek8s/container-build-extension@v0
 ```
 
-The agents need outbound access to `login.microsoftonline.com` (not for managed identity) and the registry; the
-instance metadata endpoint `169.254.169.254` is always called without proxy.
+The agents need outbound access to the registry, and to `login.microsoftonline.com` for workload identity. The
+instance metadata endpoint `169.254.169.254` is always called without a proxy.
 
 Ready-to-deploy autoscaling setups are in [examples](examples): a Managed DevOps Pool (Bicep) for Azure DevOps
 and Actions Runner Controller on AKS (Helm) for GitHub.

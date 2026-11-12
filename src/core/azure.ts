@@ -130,3 +130,43 @@ export async function hasManagedIdentity(exec: Exec): Promise<boolean> {
   );
   return r.stdout.trim() === '200';
 }
+
+/** Settings an Azure VM (agent, Managed DevOps Pool agent, runner) provides through its tags. */
+export interface MachineSettings {
+  /** tag `container-registry` */
+  registry?: string;
+  /** tag `container-registry-client-id`: client id of the managed identity to use */
+  clientId?: string;
+}
+
+export const TAG_REGISTRY = 'container-registry';
+export const TAG_CLIENT_ID = 'container-registry-client-id';
+
+let machineSettingsPromise: Promise<MachineSettings> | undefined;
+
+/**
+ * Reads the tags of the Azure VM the agent runs on from the instance metadata service (no permissions
+ * needed). Returns {} outside of Azure. The result is cached for the process.
+ */
+export function machineSettings(exec: Exec): Promise<MachineSettings> {
+  machineSettingsPromise ??= (async () => {
+    try {
+      const r = await httpRequest<{ tagsList?: Array<{ name: string; value: string }> }>(exec, {
+        url: 'http://169.254.169.254/metadata/instance/compute?api-version=2021-02-01',
+        headers: { Metadata: 'true' },
+        noProxy: true,
+        timeoutSeconds: 2,
+      });
+      const tags = new Map((r.tagsList ?? []).map((t) => [t.name.toLowerCase().replace(/_/g, '-'), t.value.trim()]));
+      return { registry: tags.get(TAG_REGISTRY) || undefined, clientId: tags.get(TAG_CLIENT_ID) || undefined };
+    } catch {
+      return {};
+    }
+  })();
+  return machineSettingsPromise;
+}
+
+/** For tests. */
+export function resetMachineSettings(): void {
+  machineSettingsPromise = undefined;
+}

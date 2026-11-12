@@ -37,8 +37,10 @@ export interface Platform {
   getInput(name: string): string | undefined;
   /** Pipeline/workflow variable or environment variable (incl. secret variables on Azure DevOps). */
   getVariable(name: string): string | undefined;
-  /** Registry implied by the platform configuration (service connection, ghcr.io on GitHub). */
+  /** Registry implied by the pipeline configuration (Azure DevOps service connection). */
   getDefaultRegistry(): string | undefined;
+  /** Registry used when nothing else is configured (ghcr.io on GitHub). */
+  getFallbackRegistry?(): string | undefined;
   /** Explicitly configured credentials (inputs, service connection). */
   getCredentials(registry: string): RegistryCredentials | undefined;
   /** Platform-specific Entra identity for Azure Container Registry (service connection, GitHub OIDC). */

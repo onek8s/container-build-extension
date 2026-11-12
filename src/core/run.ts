@@ -1,11 +1,11 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { isAcr } from './azure';
+import { isAcr, machineSettings, TAG_REGISTRY } from './azure';
 import { Docker, hasDockerLogin } from './docker';
 import { exec as defaultExec, type Exec } from './exec';
 import { readInputs, type Inputs } from './inputs';
 import type { Platform } from './platform';
-import { resolveCredentials } from './registry';
+import { needsMachineSettings, resolveCredentials } from './registry';
 import { instrumentDockerfile, prepareSafeChain, SAFE_CHAIN_CONTEXT } from './safechain';
 import { summaryMarkdown, Trivy, type ScanResult } from './scan';
 import { resolveTags } from './tags';
@@ -64,7 +64,10 @@ async function prepareBuild(
 }
 
 export async function run(platform: Platform, exec: Exec = defaultExec): Promise<RunResult> {
-  const inputs = readInputs(platform);
+  // Self-hosted agents on Azure can provide the registry through a tag of their VM
+  const machine = needsMachineSettings(platform) ? await machineSettings(exec) : undefined;
+  if (machine?.registry) platform.info(`Registry ${machine.registry} from the '${TAG_REGISTRY}' tag of the agent VM.`);
+  const inputs = readInputs(platform, machine);
   const ctx = platform.context;
   const docker = new Docker(exec);
   const tags = resolveTags(inputs.tags, ctx);

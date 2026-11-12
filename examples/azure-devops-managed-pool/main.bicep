@@ -67,66 +67,28 @@ resource devCenterProject 'Microsoft.DevCenter/projects@2024-02-01' = {
   }
 }
 
-resource pool 'Microsoft.DevOpsInfrastructure/pools@2024-10-19' = {
-  name: poolName
-  location: location
-  identity: {
-    type: 'UserAssigned'
-    userAssignedIdentities: {
-      '${agentIdentity.id}': {}
-    }
-  }
-  properties: {
-    devCenterProjectResourceId: devCenterProject.id
+// The pool is a module so that the registry and identity can be passed in as tags
+// (tags must be known when the module deployment starts).
+module pool 'pool.bicep' = {
+  name: '${poolName}-pool'
+  params: {
+    poolName: poolName
+    location: location
+    devCenterProjectId: devCenterProject.id
+    identityId: agentIdentity.id
+    identityClientId: agentIdentity.properties.clientId
+    registry: acr.properties.loginServer
+    organizationUrl: organizationUrl
+    projects: projects
     maximumConcurrency: maximumConcurrency
-    organizationProfile: {
-      kind: 'AzureDevOps'
-      organizations: [
-        {
-          url: organizationUrl
-          projects: projects
-          parallelism: maximumConcurrency
-        }
-      ]
-      permissionProfile: {
-        kind: 'CreatorOnly'
-      }
-    }
-    // Fresh agent for every job; agents are started ahead of demand based on the job history.
-    agentProfile: {
-      kind: 'Stateless'
-      resourcePredictionsProfile: {
-        kind: 'Automatic'
-        predictionPreference: 'Balanced'
-      }
-    }
-    fabricProfile: {
-      kind: 'Vmss'
-      sku: {
-        name: vmSize
-      }
-      // Azure Pipelines image: Docker is preinstalled.
-      images: [
-        {
-          wellKnownImageName: 'ubuntu-24.04/latest'
-          aliases: [
-            'ubuntu-24.04'
-          ]
-        }
-      ]
-      storageProfile: {
-        osDiskStorageAccountType: 'StandardSSD'
-      }
-      networkProfile: empty(subnetId) ? null : {
-        subnetId: subnetId
-      }
-    }
+    vmSize: vmSize
+    subnetId: subnetId
   }
   dependsOn: [
     acrPush
   ]
 }
 
-output poolName string = pool.name
+output poolName string = pool.outputs.name
 output agentIdentityClientId string = agentIdentity.properties.clientId
 output registry string = acr.properties.loginServer
