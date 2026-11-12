@@ -1,3 +1,5 @@
+import { acrCredentials, hasManagedIdentity, isAcr, workloadIdentityFromEnv } from './azure';
+import type { Exec } from './exec';
 import type { BuildContext, Platform, RegistryCredentials } from './platform';
 
 /** Well-known variable names: configure the registry once (org/project level) instead of in every pipeline. */
@@ -75,14 +77,30 @@ export function resolveImage(platform: Platform): string {
   return `${registry}/${path}`;
 }
 
+export interface CredentialOptions {
+  exec: Exec;
+  env?: NodeJS.ProcessEnv;
+  /** True when docker already has a login for the registry (e.g. from a previous step). */
+  hasExistingLogin?: (registry: string) => boolean;
+}
+
 /**
  * Credentials for the registry the image is pushed to:
- *  1. explicit, platform-specific (inputs / service connection)
+ *  1. explicit, platform-specific (inputs / service connection with username and password)
  *  2. CONTAINER_REGISTRY_USERNAME/PASSWORD, only when CONTAINER_REGISTRY points to the same registry host,
  *     so organization-wide credentials are never sent to another registry
- *  3. platform fallback (GITHUB_TOKEN for ghcr.io)
+ *  3. Azure Container Registry with an Entra identity:
+ *     a. platform identity (Azure DevOps service connection, GitHub OIDC)
+ *     b. an existing docker login is kept as is
+ *     c. AKS workload identity of the agent pod
+ *     d. managed identity of the agent VM
+ *  4. platform fallback (GITHUB_TOKEN for ghcr.io)
  */
-export function resolveCredentials(platform: Platform, registry: string): RegistryCredentials | undefined {
+export async function resolveCredentials(
+  platform: Platform,
+  registry: string,
+  opts: CredentialOptions,
+): Promise<RegistryCredentials | undefined> {
   const explicit = platform.getCredentials(registry);
   if (explicit) return explicit;
 
@@ -91,7 +109,20 @@ export function resolveCredentials(platform: Platform, registry: string): Regist
   if (password && configured && registryHost(configured) === registryHost(registry)) {
     const username = platform.getVariable(VAR_USERNAME);
     if (!username) throw new Error(`${VAR_USERNAME} is required when ${VAR_PASSWORD} is set`);
-    return { registry: registryHost(configured), username, password };
+    return { registry: registryHost(configured), username, password, source: 'CONTAINER_REGISTRY_* variables' };
+  }
+
+  if (isAcr(registry)) {
+    const mask = (v: string) => platform.setSecret(v);
+    const identity = platform.getAzureIdentity?.(registry);
+    if (identity) return acrCredentials(opts.exec, registry, identity, mask);
+    if (opts.hasExistingLogin?.(registry)) return undefined;
+    const workload = workloadIdentityFromEnv(opts.env ?? process.env);
+    if (workload) return acrCredentials(opts.exec, registry, workload, mask);
+    if (await hasManagedIdentity(opts.exec)) {
+      const clientId = platform.getInput('azureClientId') ?? (opts.env ?? process.env).AZURE_CLIENT_ID;
+      return acrCredentials(opts.exec, registry, { kind: 'managed', source: 'managed identity', clientId }, mask);
+    }
   }
   return platform.getFallbackCredentials?.(registry);
 }

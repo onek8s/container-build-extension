@@ -19,6 +19,10 @@ steps:
       containerRegistry: my-acr-connection
 ```
 
+Azure Container Registry works without passwords: with a workload identity federation service connection, or on
+self-hosted agents with a managed identity or AKS workload identity. There, setting `CONTAINER_REGISTRY=myacr.azurecr.io`
+in the agent's environment is all it takes.
+
 That's it. Configure the registry once in a variable group or service connection. The image name is derived
 automatically as `<registry>/<project>/<repository>`. The task:
 

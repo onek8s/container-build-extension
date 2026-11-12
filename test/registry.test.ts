@@ -6,6 +6,7 @@ import {
   resolveImage,
   sanitizeComponent,
 } from '../src/core/registry';
+import type { Exec } from '../src/core/exec';
 import { FakePlatform } from './helpers';
 
 const ctx = { isPullRequest: false, tempDir: '/tmp', workspace: '/w', project: 'Web Shop', repository: 'Front_End.App' };
@@ -62,34 +63,37 @@ describe('image naming', () => {
   });
 });
 
+const noNetwork: Exec = async () => ({ exitCode: 7, stdout: '', stderr: 'offline' });
+const opts = { exec: noNetwork, env: {} };
+
 describe('resolveCredentials', () => {
   const vars = { CONTAINER_REGISTRY: 'myacr.azurecr.io/team', CONTAINER_REGISTRY_USERNAME: 'u', CONTAINER_REGISTRY_PASSWORD: 'p' };
 
-  it('uses organization variables for the configured registry', () => {
-    expect(resolveCredentials(platform({}, vars), 'myacr.azurecr.io')).toEqual({
+  it('uses organization variables for the configured registry', async () => {
+    expect(await resolveCredentials(platform({}, vars), 'myacr.azurecr.io', opts)).toMatchObject({
       registry: 'myacr.azurecr.io',
       username: 'u',
       password: 'p',
     });
   });
 
-  it('never sends organization credentials to another registry', () => {
-    expect(resolveCredentials(platform({}, vars), 'evil.example.com')).toBeUndefined();
-    expect(resolveCredentials(platform({}, { CONTAINER_REGISTRY_USERNAME: 'u', CONTAINER_REGISTRY_PASSWORD: 'p' }), 'x.io')).toBeUndefined();
+  it('never sends organization credentials to another registry', async () => {
+    expect(await resolveCredentials(platform({}, vars), 'evil.example.com', opts)).toBeUndefined();
+    expect(await resolveCredentials(platform({}, { CONTAINER_REGISTRY_USERNAME: 'u', CONTAINER_REGISTRY_PASSWORD: 'p' }), 'x.io', opts)).toBeUndefined();
   });
 
-  it('prefers explicit credentials and falls back to the platform', () => {
+  it('prefers explicit credentials and falls back to the platform', async () => {
     const p = platform({}, vars);
     p.creds = { registry: 'myacr.azurecr.io', username: 'sc', password: 'scpw' };
-    expect(resolveCredentials(p, 'myacr.azurecr.io')?.username).toBe('sc');
+    expect((await resolveCredentials(p, 'myacr.azurecr.io', opts))?.username).toBe('sc');
 
     const q = platform();
     q.getFallbackCredentials = (r) => ({ registry: r, username: 'actor', password: 'token' });
-    expect(resolveCredentials(q, 'ghcr.io')?.password).toBe('token');
+    expect((await resolveCredentials(q, 'ghcr.io', opts))?.password).toBe('token');
   });
 
-  it('requires a username', () => {
-    expect(() => resolveCredentials(platform({}, { CONTAINER_REGISTRY: 'a.io', CONTAINER_REGISTRY_PASSWORD: 'p' }), 'a.io')).toThrow(
+  it('requires a username', async () => {
+    await expect(resolveCredentials(platform({}, { CONTAINER_REGISTRY: 'a.io', CONTAINER_REGISTRY_PASSWORD: 'p' }), 'a.io', opts)).rejects.toThrow(
       /USERNAME/,
     );
   });

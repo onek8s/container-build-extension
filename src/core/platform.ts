@@ -1,3 +1,5 @@
+import type { AzureIdentity } from './azure';
+
 /**
  * The only surface that differs between GitHub Actions and Azure DevOps.
  * Everything else (build, scan, push, tagging) lives in the shared core.
@@ -6,6 +8,8 @@ export interface RegistryCredentials {
   registry: string;
   username: string;
   password: string;
+  /** Where the credentials came from, for the log. */
+  source?: string;
 }
 
 export interface BuildContext {
@@ -37,6 +41,8 @@ export interface Platform {
   getDefaultRegistry(): string | undefined;
   /** Explicitly configured credentials (inputs, service connection). */
   getCredentials(registry: string): RegistryCredentials | undefined;
+  /** Platform-specific Entra identity for Azure Container Registry (service connection, GitHub OIDC). */
+  getAzureIdentity?(registry: string): AzureIdentity | undefined;
   /** Credentials used when nothing is configured (e.g. GITHUB_TOKEN for ghcr.io). */
   getFallbackCredentials?(registry: string): RegistryCredentials | undefined;
   readonly context: BuildContext;

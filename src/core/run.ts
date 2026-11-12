@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { Docker } from './docker';
+import { isAcr } from './azure';
+import { Docker, hasDockerLogin } from './docker';
 import { exec as defaultExec, type Exec } from './exec';
 import { readInputs, type Inputs } from './inputs';
 import type { Platform } from './platform';
@@ -147,13 +148,18 @@ export async function run(platform: Platform, exec: Exec = defaultExec): Promise
   }
 
   if (inputs.push) {
-    const creds = resolveCredentials(platform, inputs.registry);
+    const creds = await resolveCredentials(platform, inputs.registry, { exec, hasExistingLogin: hasDockerLogin });
     if (creds) {
       platform.setSecret(creds.password);
-      platform.info(`Logging in to ${creds.registry} as ${creds.username}`);
+      platform.info(`Logging in to ${creds.registry}${creds.source ? ` with ${creds.source}` : ` as ${creds.username}`}`);
       await docker.login(creds);
     } else {
       platform.info(`No credentials configured for ${inputs.registry}; using existing docker login.`);
+      if (isAcr(inputs.registry)) {
+        platform.info(
+          'No Azure identity found either (service connection, GitHub OIDC, AKS workload identity or managed identity of the agent).',
+        );
+      }
     }
     try {
       await group(platform, 'Push image', async () => {
