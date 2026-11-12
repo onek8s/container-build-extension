@@ -33,6 +33,7 @@ export class AzurePlatform implements Platform {
       isPullRequest: env.BUILD_REASON === 'PullRequest',
       tempDir: env.AGENT_TEMPDIRECTORY || os.tmpdir(),
       workspace: env.BUILD_SOURCESDIRECTORY || process.cwd(),
+      toolCacheDir: env.AGENT_TOOLSDIRECTORY || undefined,
     };
   }
 
@@ -110,6 +111,9 @@ export class AzurePlatform implements Platform {
     const file = path.join(this.context.tempDir, `container-build-summary-${Date.now()}.md`);
     fs.writeFileSync(file, markdown);
     this.command('task.uploadsummary', {}, file);
+  }
+  publishArtifact(name: string, file: string): void {
+    this.command('artifact.upload', { containerfolder: name, artifactname: name }, file);
   }
   setFailed(message: string): void {
     this.error(message);

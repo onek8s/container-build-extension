@@ -2,15 +2,17 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { Docker } from './docker';
 import { exec as defaultExec, type Exec } from './exec';
-import { readInputs } from './inputs';
+import { readInputs, type Inputs } from './inputs';
 import type { Platform } from './platform';
-import { scanImage, summaryMarkdown, type ScanResult } from './scan';
+import { instrumentDockerfile, prepareSafeChain, SAFE_CHAIN_CONTEXT } from './safechain';
+import { summaryMarkdown, Trivy, type ScanResult } from './scan';
 import { resolveTags } from './tags';
 
 export interface RunResult {
   imageRefs: string[];
   pushed: boolean;
   digest?: string;
+  sbom?: string;
   scan?: ScanResult;
 }
 
@@ -21,6 +23,42 @@ async function group<T>(platform: Platform, name: string, fn: () => Promise<T>):
   } finally {
     platform.endGroup();
   }
+}
+
+/**
+ * Returns the Dockerfile and extra build contexts to use. With safe-chain enabled this is an
+ * instrumented copy of the user's Dockerfile; the original is never modified.
+ */
+async function prepareBuild(
+  platform: Platform,
+  exec: Exec,
+  inputs: Inputs,
+): Promise<{ dockerfile: string; buildContexts: Record<string, string>; safeChain: string }> {
+  const plain = { dockerfile: inputs.dockerfile, buildContexts: {}, safeChain: 'disabled' };
+  if (!inputs.safeChain) return plain;
+  if (process.platform !== 'linux' || !['x64', 'arm64'].includes(process.arch)) {
+    platform.warning(`safe-chain is only supported on Linux x64/arm64 agents; building without it.`);
+    return { ...plain, safeChain: 'unsupported agent' };
+  }
+
+  const result = instrumentDockerfile(fs.readFileSync(inputs.dockerfile, 'utf8'));
+  if (result.wrapped === 0) {
+    platform.info(`safe-chain: no RUN instructions to protect${result.reason ? ` (${result.reason})` : ''}.`);
+    return { ...plain, safeChain: 'nothing to protect' };
+  }
+
+  const ctx = platform.context;
+  const safeChainDir = await prepareSafeChain(exec, ctx.toolCacheDir ?? ctx.tempDir);
+  const dir = fs.mkdtempSync(path.join(ctx.tempDir, 'container-build-'));
+  const dockerfile = path.join(dir, path.basename(inputs.dockerfile));
+  fs.writeFileSync(dockerfile, result.content);
+  // BuildKit looks for <Dockerfile>.dockerignore next to the Dockerfile before <context>/.dockerignore
+  const ignore = `${inputs.dockerfile}.dockerignore`;
+  if (fs.existsSync(ignore)) fs.copyFileSync(ignore, `${dockerfile}.dockerignore`);
+
+  const skipped = result.skipped ? ` (${result.skipped} exec-form/heredoc/custom-shell RUN left as is)` : '';
+  platform.info(`safe-chain: protecting package installs in ${result.wrapped} RUN instruction(s)${skipped}.`);
+  return { dockerfile, buildContexts: { [SAFE_CHAIN_CONTEXT]: safeChainDir }, safeChain: `${result.wrapped} RUN instruction(s)` };
 }
 
 export async function run(platform: Platform, exec: Exec = defaultExec): Promise<RunResult> {
@@ -36,6 +74,8 @@ export async function run(platform: Platform, exec: Exec = defaultExec): Promise
   platform.info(`Tags:       ${tags.join(', ')}`);
   platform.info(`Context:    ${inputs.context}`);
   platform.info(`Dockerfile: ${inputs.dockerfile}`);
+  platform.info(`SafeChain:  ${inputs.safeChain ? 'yes' : 'no'}`);
+  platform.info(`SBOM:       ${inputs.sbom ? inputs.sbomFormat : 'no'}`);
   platform.info(`Scan:       ${inputs.scan ? `yes (${inputs.severity})` : 'no'}`);
   platform.info(`Push:       ${inputs.push ? 'yes' : 'no'}`);
   platform.info(`Docker:     ${await docker.version()}`);
@@ -46,45 +86,62 @@ export async function run(platform: Platform, exec: Exec = defaultExec): Promise
   const result: RunResult = { imageRefs, pushed: false };
   const summary: string[] = [`### Container build: \`${inputs.repository}\``, '', `Tags: ${tags.map((t) => `\`${t}\``).join(', ')}`, ''];
 
+  const build = await prepareBuild(platform, exec, inputs);
   await group(platform, 'Build image', () =>
     docker.build({
       context: inputs.context,
-      dockerfile: inputs.dockerfile,
+      dockerfile: build.dockerfile,
       imageRefs,
       buildArgs: inputs.buildArgs,
       target: inputs.target,
       labels,
+      buildContexts: build.buildContexts,
     }),
   );
+  if (inputs.safeChain) summary.push(`🛡️ Package installs protected by [Aikido Safe Chain](https://github.com/AikidoSec/safe-chain): ${build.safeChain}`, '');
 
-  if (inputs.scan) {
+  if (inputs.sbom || inputs.scan) {
     const ignoreFile = [path.join(inputs.context, '.trivyignore'), path.join(ctx.workspace, '.trivyignore')].find((f) =>
       fs.existsSync(f),
     );
-    const scan = await group(platform, 'Security scan (Trivy)', () =>
-      scanImage(exec, {
-        imageRef: imageRefs[0],
-        trivyImage: inputs.trivyImage,
-        severity: inputs.severity,
-        ignoreUnfixed: inputs.ignoreUnfixed,
-        tempDir: ctx.tempDir,
-        ignoreFile,
-      }),
-    );
-    result.scan = scan;
-    platform.setOutput('scanReport', scan.reportFile);
-    platform.setOutput('vulnerabilities', String(scan.vulnerabilities.length));
-    summary.push('#### Security scan', '', summaryMarkdown(scan, inputs.severity), '');
-
-    if (scan.vulnerabilities.length > 0) {
-      const msg = `Found ${scan.vulnerabilities.length} vulnerabilities with severity ${inputs.severity}`;
-      if (inputs.failOnVulnerabilities) {
-        platform.addSummary(summary.join('\n'));
-        throw new Error(`${msg}. Image was not pushed. Fix them, add them to .trivyignore, or set failOnVulnerabilities to false.`);
+    const trivy = await Trivy.prepare(exec, {
+      imageRef: imageRefs[0],
+      trivyImage: inputs.trivyImage,
+      tempDir: ctx.tempDir,
+      ignoreFile,
+    });
+    try {
+      if (inputs.sbom) {
+        const sbom = await group(platform, `Generate SBOM (${inputs.sbomFormat})`, () => trivy.sbom(inputs.sbomFormat, inputs.repository));
+        result.sbom = sbom;
+        platform.setOutput('sbom', sbom);
+        platform.publishArtifact('sbom', sbom);
+        platform.info(`SBOM written to ${sbom}`);
+        summary.push(`📦 SBOM (${inputs.sbomFormat}) generated.`, '');
       }
-      platform.warning(msg);
-    } else {
-      platform.info('No vulnerabilities found.');
+
+      if (inputs.scan) {
+        const scan = await group(platform, 'Security scan (Trivy)', () =>
+          trivy.scan({ severity: inputs.severity, ignoreUnfixed: inputs.ignoreUnfixed, ignoreFile }),
+        );
+        result.scan = scan;
+        platform.setOutput('scanReport', scan.reportFile);
+        platform.setOutput('vulnerabilities', String(scan.vulnerabilities.length));
+        summary.push('#### Security scan', '', summaryMarkdown(scan, inputs.severity), '');
+
+        if (scan.vulnerabilities.length > 0) {
+          const msg = `Found ${scan.vulnerabilities.length} vulnerabilities with severity ${inputs.severity}`;
+          if (inputs.failOnVulnerabilities) {
+            platform.addSummary(summary.join('\n'));
+            throw new Error(`${msg}. Image was not pushed. Fix them, add them to .trivyignore, or set failOnVulnerabilities to false.`);
+          }
+          platform.warning(msg);
+        } else {
+          platform.info('No vulnerabilities found.');
+        }
+      }
+    } finally {
+      trivy.cleanup();
     }
   }
 

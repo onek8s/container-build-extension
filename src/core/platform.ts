@@ -19,6 +19,8 @@ export interface BuildContext {
   tempDir: string;
   /** Workspace / sources directory. */
   workspace: string;
+  /** Directory for downloaded tools that may be reused between jobs (defaults to tempDir). */
+  toolCacheDir?: string;
 }
 
 export interface Platform {
@@ -38,5 +40,7 @@ export interface Platform {
   setSecret(value: string): void;
   setOutput(name: string, value: string): void;
   addSummary(markdown: string): void;
+  /** Publishes a file as a build artifact where the platform supports it from a task. */
+  publishArtifact(name: string, file: string): void;
   setFailed(message: string): void;
 }

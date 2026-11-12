@@ -21,6 +21,11 @@
       "isExpanded": false
     },
     {
+      "name": "supplychain",
+      "displayName": "Supply chain",
+      "isExpanded": false
+    },
+    {
       "name": "scan",
       "displayName": "Security scan",
       "isExpanded": false
@@ -92,6 +97,37 @@
       "groupName": "build"
     },
     {
+      "name": "safeChain",
+      "type": "boolean",
+      "label": "Protect package installs with Aikido Safe Chain",
+      "defaultValue": "true",
+      "required": false,
+      "groupName": "supplychain",
+      "helpMarkDown": "Runs package managers (npm, yarn, pnpm, pip, uv, poetry, ...) in the Dockerfile's `RUN` instructions through [Aikido Safe Chain](https://github.com/AikidoSec/safe-chain), which blocks malware and packages newer than 48 hours. Nothing is added to the image."
+    },
+    {
+      "name": "sbom",
+      "type": "boolean",
+      "label": "Generate SBOM",
+      "defaultValue": "true",
+      "required": false,
+      "groupName": "supplychain",
+      "helpMarkDown": "Generates an SBOM of the image and publishes it as the `sbom` build artifact."
+    },
+    {
+      "name": "sbomFormat",
+      "type": "pickList",
+      "label": "SBOM format",
+      "defaultValue": "cyclonedx",
+      "required": false,
+      "groupName": "supplychain",
+      "visibleRule": "sbom = true",
+      "options": {
+        "cyclonedx": "CycloneDX (JSON)",
+        "spdx-json": "SPDX (JSON)"
+      }
+    },
+    {
       "name": "scan",
       "type": "boolean",
       "label": "Scan image",
@@ -152,6 +188,10 @@
     {
       "name": "imageRef",
       "description": "Immutable image reference (image@digest)"
+    },
+    {
+      "name": "sbom",
+      "description": "Path to the SBOM file"
     },
     {
       "name": "vulnerabilities",

@@ -73,30 +73,28 @@ export function proxyArgs(env: NodeJS.ProcessEnv): string[] {
   return args;
 }
 
-/**
- * Scans a locally built image with Trivy running in a container.
- * The image is exported with `docker save` so no docker socket has to be shared with the scanner,
- * which keeps it working with remote / rootless daemons too.
- */
-export async function scanImage(
-  exec: Exec,
-  opts: {
-    imageRef: string;
-    trivyImage: string;
-    severity: string;
-    ignoreUnfixed: boolean;
-    tempDir: string;
-    ignoreFile?: string;
-  },
-): Promise<ScanResult> {
-  const workDir = fs.mkdtempSync(path.join(opts.tempDir, 'container-scan-'));
-  const cacheDir = path.join(opts.tempDir, 'trivy-cache');
-  fs.mkdirSync(cacheDir, { recursive: true });
-  const tarFile = path.join(workDir, 'image.tar');
-  const reportFile = path.join(workDir, 'trivy-report.json');
+export type SbomFormat = 'cyclonedx' | 'spdx-json';
 
-  try {
-    await exec('docker', ['save', '--output', tarFile, opts.imageRef], { silent: true });
+/**
+ * Runs Trivy in a container against a locally built image.
+ * The image is exported once with `docker save`, so no docker socket has to be shared with the
+ * scanner, which keeps it working with remote / rootless daemons too.
+ */
+export class Trivy {
+  private constructor(
+    private readonly exec: Exec,
+    readonly workDir: string,
+    private readonly runArgs: string[],
+  ) {}
+
+  static async prepare(
+    exec: Exec,
+    opts: { imageRef: string; trivyImage: string; tempDir: string; ignoreFile?: string },
+  ): Promise<Trivy> {
+    const workDir = fs.mkdtempSync(path.join(opts.tempDir, 'container-scan-'));
+    const cacheDir = path.join(opts.tempDir, 'trivy-cache');
+    fs.mkdirSync(cacheDir, { recursive: true });
+    await exec('docker', ['save', '--output', path.join(workDir, 'image.tar'), opts.imageRef], { silent: true });
 
     const run = ['run', '--rm', '-v', `${workDir}:/scan`, '-v', `${cacheDir}:/cache`];
     if (typeof process.getuid === 'function' && process.getuid() !== 0) {
@@ -105,31 +103,45 @@ export async function scanImage(
     if (opts.ignoreFile) run.push('-v', `${opts.ignoreFile}:/scan-config/.trivyignore:ro`);
     run.push(...proxyArgs(process.env));
     run.push(opts.trivyImage);
+    return new Trivy(exec, workDir, run);
+  }
 
-    const trivyArgs = [
-      'image',
-      '--input', '/scan/image.tar',
-      '--cache-dir', '/cache',
-      '--scanners', 'vuln',
-      '--severity', opts.severity,
-      '--format', 'json',
-      '--output', '/scan/trivy-report.json',
-      '--exit-code', '0',
-      '--no-progress',
+  private trivy(args: string[], options = {}) {
+    return this.exec('docker', [...this.runArgs, ...args], options);
+  }
+
+  /** Generates an SBOM of the image and returns its path on the host. */
+  async sbom(format: SbomFormat, repository: string): Promise<string> {
+    const base = repository.replace(/[^a-z0-9.-]+/g, '_');
+    const name = `${base}.${format === 'cyclonedx' ? 'cdx' : 'spdx'}.json`;
+    await this.trivy([
+      'image', '--input', '/scan/image.tar', '--cache-dir', '/cache',
+      '--format', format, '--output', `/scan/${name}`, '--no-progress', '--quiet',
+    ]);
+    return path.join(this.workDir, name);
+  }
+
+  async scan(opts: { severity: string; ignoreUnfixed: boolean; ignoreFile?: string }): Promise<ScanResult> {
+    const args = [
+      'image', '--input', '/scan/image.tar', '--cache-dir', '/cache',
+      '--scanners', 'vuln', '--severity', opts.severity,
+      '--format', 'json', '--output', '/scan/trivy-report.json',
+      '--exit-code', '0', '--no-progress',
     ];
-    if (opts.ignoreUnfixed) trivyArgs.push('--ignore-unfixed');
-    if (opts.ignoreFile) trivyArgs.push('--ignorefile', '/scan-config/.trivyignore');
-    await exec('docker', [...run, ...trivyArgs]);
-
+    if (opts.ignoreUnfixed) args.push('--ignore-unfixed');
+    if (opts.ignoreFile) args.push('--ignorefile', '/scan-config/.trivyignore');
+    await this.trivy(args);
     // human readable table in the log
-    await exec('docker', [...run, 'convert', '--format', 'table', '/scan/trivy-report.json'], {
-      ignoreReturnCode: true,
-    });
+    await this.trivy(['convert', '--format', 'table', '/scan/trivy-report.json'], { ignoreReturnCode: true });
 
+    const reportFile = path.join(this.workDir, 'trivy-report.json');
     const vulnerabilities = parseTrivyReport(fs.readFileSync(reportFile, 'utf8'));
     return { vulnerabilities, counts: countBySeverity(vulnerabilities), reportFile };
-  } finally {
-    fs.rmSync(tarFile, { force: true });
+  }
+
+  /** Removes the (large) image tarball, keeps reports. */
+  cleanup(): void {
+    fs.rmSync(path.join(this.workDir, 'image.tar'), { force: true });
   }
 }
 

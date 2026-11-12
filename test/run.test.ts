@@ -17,7 +17,9 @@ function setup(vulns: unknown[] = []) {
     if (args[0] === 'image' && args[1] === 'inspect') return out('["reg.io/app@sha256:deadbeef"]');
     if (args[0] === 'run' && args.includes('--output')) {
       const mount = args[args.indexOf('-v') + 1].split(':')[0];
-      fs.writeFileSync(path.join(mount, 'trivy-report.json'), JSON.stringify({ Results: [{ Target: 'x', Vulnerabilities: vulns }] }));
+      const out = args[args.indexOf('--output') + 1].replace('/scan/', '');
+      const body = args.includes('vuln') ? { Results: [{ Target: 'x', Vulnerabilities: vulns }] } : { bomFormat: 'CycloneDX' };
+      fs.writeFileSync(path.join(mount, out), JSON.stringify(body));
     }
     return out();
   };
@@ -30,11 +32,15 @@ const vuln = { VulnerabilityID: 'CVE-1', PkgName: 'openssl', InstalledVersion: '
 describe('run', () => {
   it('builds, scans, logs in, pushes and sets outputs', async () => {
     const { calls, exec, ctx } = setup();
-    const p = new FakePlatform({ image: 'reg.io/app' }, ctx, { registry: 'reg.io', username: 'u', password: 'pw' });
+    const p = new FakePlatform({ image: 'reg.io/app', safeChain: 'false' }, ctx, { registry: 'reg.io', username: 'u', password: 'pw' });
     const r = await run(p, exec);
 
     const cmds = calls.map((c) => c.args[0]);
-    expect(cmds).toEqual(['version', 'build', 'save', 'run', 'run', 'login', 'push', 'push', 'logout', 'image']);
+    expect(cmds).toEqual(['version', 'build', 'save', 'run', 'run', 'run', 'login', 'push', 'push', 'logout', 'image']);
+    expect(calls[3].args).toEqual(expect.arrayContaining(['--format', 'cyclonedx', '--output', '/scan/reg.io_app.cdx.json']));
+    expect(r.sbom).toMatch(/reg\.io_app\.cdx\.json$/);
+    expect(p.outputs.sbom).toBe(r.sbom);
+    expect(p.artifacts).toEqual([['sbom', r.sbom]]);
     const build = calls[1].args;
     expect(build).toEqual(expect.arrayContaining(['--tag', 'reg.io/app:latest', '--tag', 'reg.io/app:1234567']));
     expect(calls.find((c) => c.args[0] === 'login')?.opts?.input).toBe('pw');
@@ -52,7 +58,7 @@ describe('run', () => {
 
   it('fails without pushing when vulnerabilities are found', async () => {
     const { calls, exec, ctx } = setup([vuln]);
-    const p = new FakePlatform({ image: 'reg.io/app' }, ctx);
+    const p = new FakePlatform({ image: 'reg.io/app', safeChain: 'false' }, ctx);
     await expect(run(p, exec)).rejects.toThrow(/Found 1 vulnerabilities/);
     expect(calls.some((c) => c.args[0] === 'push')).toBe(false);
     expect(p.summary).toContain('CVE-1');
@@ -60,7 +66,7 @@ describe('run', () => {
 
   it('only warns when failOnVulnerabilities is false', async () => {
     const { calls, exec, ctx } = setup([vuln]);
-    const p = new FakePlatform({ image: 'reg.io/app', failOnVulnerabilities: 'false' }, ctx);
+    const p = new FakePlatform({ image: 'reg.io/app', failOnVulnerabilities: 'false', safeChain: 'false' }, ctx);
     await run(p, exec);
     expect(calls.some((c) => c.args[0] === 'push')).toBe(true);
     expect(p.logs.some((l) => l.startsWith('WARN'))).toBe(true);
@@ -68,7 +74,7 @@ describe('run', () => {
 
   it('skips scan and push when disabled', async () => {
     const { calls, exec, ctx } = setup();
-    const p = new FakePlatform({ image: 'reg.io/app', scan: 'false', push: 'false', tags: 'v1' }, ctx);
+    const p = new FakePlatform({ image: 'reg.io/app', scan: 'false', sbom: 'false', push: 'false', tags: 'v1', safeChain: 'false' }, ctx);
     const r = await run(p, exec);
     expect(calls.map((c) => c.args[0])).toEqual(['version', 'build']);
     expect(r.imageRefs).toEqual(['reg.io/app:v1']);
@@ -77,7 +83,7 @@ describe('run', () => {
 
   it('fails when Dockerfile is missing', async () => {
     const { exec, ctx } = setup();
-    await expect(run(new FakePlatform({ image: 'reg.io/app', dockerfile: 'nope' }, ctx), exec)).rejects.toThrow(/Dockerfile not found/);
+    await expect(run(new FakePlatform({ image: 'reg.io/app', dockerfile: 'nope', safeChain: 'false' }, ctx), exec)).rejects.toThrow(/Dockerfile not found/);
   });
 });
 

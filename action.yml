@@ -39,6 +39,18 @@ inputs:
     description: "Token used for ghcr.io when no password is given. Requires 'packages: write' permission."
     required: false
     default: ${{ github.token }}
+  safe-chain:
+    description: "Protect package installs (npm, yarn, pnpm, pip, uv, poetry, ...) in the Dockerfile's RUN instructions with Aikido Safe Chain (blocks malware and packages newer than 48h)."
+    required: false
+    default: "true"
+  sbom:
+    description: "Generate an SBOM of the image."
+    required: false
+    default: "true"
+  sbom-format:
+    description: "SBOM format: cyclonedx or spdx-json."
+    required: false
+    default: "cyclonedx"
   scan:
     description: "Scan the image with Trivy before pushing."
     required: false
@@ -70,6 +82,8 @@ outputs:
     description: "Immutable image reference (image@digest)"
   vulnerabilities:
     description: "Number of vulnerabilities found by the scan"
+  sbom:
+    description: "Path to the SBOM file (upload it with actions/upload-artifact)"
   scan-report:
     description: "Path to the Trivy JSON report"
 

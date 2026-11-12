@@ -14,11 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
-        with:
-          node-version: 24
-          cache: npm
-      - run: npm ci
+      - uses: ./.github/actions/setup
       - run: npm run check
       - name: Check bundled files are up to date
         run: |
@@ -60,15 +56,41 @@ jobs:
           IMAGE_REF: ${{ steps.build.outputs.image-ref }}
           TAGS: ${{ steps.build.outputs.tags }}
           VULNS: ${{ steps.build.outputs.vulnerabilities }}
+          SBOM: ${{ steps.build.outputs.sbom }}
         run: |
           set -eu
-          echo "digest=$DIGEST image-ref=$IMAGE_REF tags=$TAGS vulnerabilities=$VULNS"
+          echo "digest=$DIGEST image-ref=$IMAGE_REF tags=$TAGS vulnerabilities=$VULNS sbom=$SBOM"
+          # SBOM lists the npm dependency installed (through safe-chain) during the build
+          jq -e '.bomFormat == "CycloneDX" and ([.components[] | select(.name == "is-number")] | length == 1)' "$SBOM"
           [[ "$DIGEST" == sha256:* ]]
           [[ "$IMAGE_REF" == "localhost:5000/e2e/app@$DIGEST" ]]
           [[ "$VULNS" == "0" ]]
           short=$(echo "$GITHUB_SHA" | cut -c1-7)
           curl -sf localhost:5000/v2/e2e/app/tags/list | tee /dev/stderr | grep -q "\"$short\""
           docker pull "$IMAGE_REF"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: ${{ steps.build.outputs.sbom }}
+
+      - name: Malicious package must be blocked by safe-chain
+        id: malicious
+        continue-on-error: true
+        uses: ./
+        with:
+          image: localhost:5000/e2e/malicious
+          context: test/fixtures/malicious
+          push: "true"
+
+      - name: Verify malicious build was blocked
+        env:
+          OUTCOME: ${{ steps.malicious.outcome }}
+        run: |
+          set -eu
+          echo "outcome=$OUTCOME"
+          [[ "$OUTCOME" == "failure" ]]
+          ! curl -sf localhost:5000/v2/e2e/malicious/tags/list
 
       - name: Vulnerable image must not be pushed
         id: vulnerable
@@ -97,11 +119,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
-        with:
-          node-version: 24
-          cache: npm
-      - run: npm ci && npm run build
+      - uses: ./.github/actions/setup
+      - run: npm run build
       - name: Start authenticated registry
         run: |
           mkdir -p "$RUNNER_TEMP/auth"
@@ -131,6 +150,8 @@ jobs:
         run: |
           set -eu
           grep -q '##vso\[task.setvariable variable=digest;isOutput=true\]sha256:' "$RUNNER_TEMP/azure.log"
+          sbom=$(sed -n 's/^##vso\[artifact.upload containerfolder=sbom;artifactname=sbom\]//p' "$RUNNER_TEMP/azure.log")
+          jq -e '.bomFormat == "CycloneDX"' "$sbom"
           tags=$(curl -sf -u tester:s3cret localhost:5001/v2/e2e/azure-app/tags/list)
           echo "$tags"
           echo "$tags" | grep -q '"v9.8.7"'
