@@ -1,0 +1,14 @@
+# Pipeline using the Managed DevOps Pool from main.bicep.
+# Variable group "container-registry" (Pipelines -> Library):
+#   CONTAINER_REGISTRY = <registry login server>      (output "registry")
+#   AZURE_CLIENT_ID    = <agent identity client id>   (output "agentIdentityClientId")
+trigger:
+  - main
+
+pool: container-build
+
+variables:
+  - group: container-registry
+
+steps:
+  - task: ContainerBuild@0

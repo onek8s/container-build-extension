@@ -181,6 +181,9 @@ jobs:
 The agents need outbound access to `login.microsoftonline.com` (not for managed identity) and the registry; the
 instance metadata endpoint `169.254.169.254` is always called without proxy.
 
+Ready-to-deploy autoscaling setups are in [examples](examples): a Managed DevOps Pool (Bicep) for Azure DevOps
+and Actions Runner Controller on AKS (Helm) for GitHub.
+
 ### Azure DevOps with workload identity federation
 
 Create a *Docker Registry → Azure Container Registry* service connection with *Workload Identity federation*, then:
