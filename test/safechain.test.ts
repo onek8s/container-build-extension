@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import type { Exec } from '../src/core/exec';
-import { instrumentDockerfile, prepareSafeChain, SAFE_CHAIN_CONTEXT, SAFE_CHAIN_VERSION } from '../src/core/safechain';
+import { createSkipAgeShims, instrumentDockerfile, prepareSafeChain, SAFE_CHAIN_CONTEXT, SAFE_CHAIN_VERSION } from '../src/core/safechain';
 
 const MOUNT = `--mount=type=cache,id=${SAFE_CHAIN_CONTEXT}`;
 
@@ -58,9 +58,26 @@ describe('instrumentDockerfile', () => {
     expect(r.content.split('\n')[2]).toBe('    RUN=2');
   });
 
+  it('mounts the shims that skip the minimum package age on request', () => {
+    expect(instrumentDockerfile('FROM a\nRUN npm ci').content).toContain('source=shims,');
+    expect(instrumentDockerfile('FROM a\nRUN npm ci', { skipMinimumPackageAge: true }).content).toContain(
+      'source=shims-skip-minimum-age,',
+    );
+  });
+
   it('skips Windows Dockerfiles', () => {
     const r = instrumentDockerfile('# escape=`\nFROM mcr.microsoft.com/windows\nRUN echo hi');
     expect(r).toMatchObject({ wrapped: 0, reason: expect.stringContaining('escape') });
+  });
+});
+
+describe('createSkipAgeShims', () => {
+  it('rejects shims in an unknown format', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'shims-'));
+    fs.mkdirSync(path.join(dir, 'shims'));
+    fs.writeFileSync(path.join(dir, 'shims', 'npm'), '#!/bin/sh\nexec something-else');
+    expect(() => createSkipAgeShims(path.join(dir, 'shims'), path.join(dir, 'out'))).toThrow(/Unexpected/);
+    expect(fs.existsSync(path.join(dir, 'out'))).toBe(false);
   });
 });
 
@@ -77,7 +94,7 @@ describe('prepareSafeChain', () => {
         expect(opts?.env?.GITHUB_PATH).toBeUndefined();
         const dir = path.dirname(path.dirname(cmd));
         fs.mkdirSync(path.join(dir, 'shims'), { recursive: true });
-        fs.writeFileSync(path.join(dir, 'shims', 'npm'), '#!/bin/sh');
+        fs.writeFileSync(path.join(dir, 'shims', 'npm'), '#!/bin/sh\n  PATH=$(x) exec safe-chain npm "$@"\n');
         fs.mkdirSync(path.join(dir, 'certs'), { recursive: true });
       }
       return { exitCode: 0, stdout: '', stderr: '' };
@@ -95,6 +112,9 @@ describe('prepareSafeChain', () => {
     expect(calls[0]).toEqual(expect.arrayContaining(['curl', expect.stringContaining(`/${SAFE_CHAIN_VERSION}/safe-chain-linuxstatic-x64`)]));
     expect(fs.existsSync(path.join(dir, 'shims', 'npm'))).toBe(true);
     expect(fs.existsSync(path.join(dir, 'certs'))).toBe(false);
+    expect(fs.readFileSync(path.join(dir, 'shims-skip-minimum-age', 'npm'), 'utf8')).toContain(
+      'exec safe-chain npm --safe-chain-skip-minimum-package-age "$@"',
+    );
 
     const second = fakeExec();
     await prepareSafeChain(second.exec, cache, 'x64', sha);

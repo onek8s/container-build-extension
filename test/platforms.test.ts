@@ -16,10 +16,11 @@ describe('GitHubPlatform', () => {
       GITHUB_SHA: 'abc',
       GITHUB_REF: 'refs/pull/1/merge',
       GITHUB_EVENT_NAME: 'pull_request',
+      GITHUB_RUN_ATTEMPT: '2',
     });
     expect(p.getInput('buildArgs')).toBe('A=1');
     expect(p.getInput('failOnVulnerabilities')).toBeUndefined();
-    expect(p.context).toMatchObject({ sha: 'abc', ref: 'refs/pull/1/merge', isPullRequest: true });
+    expect(p.context).toMatchObject({ sha: 'abc', ref: 'refs/pull/1/merge', isPullRequest: true, attempt: 2 });
   });
 
   it('uses github token for ghcr.io only', () => {
@@ -177,8 +178,13 @@ describe('AzurePlatform', () => {
   });
 
   it('maps context and escapes logging commands', () => {
-    const p = new AzurePlatform({ BUILD_SOURCEBRANCH: 'refs/heads/main', BUILD_SOURCEVERSION: 'abc', BUILD_REASON: 'PullRequest' });
-    expect(p.context).toMatchObject({ ref: 'refs/heads/main', sha: 'abc', isPullRequest: true });
+    const p = new AzurePlatform({
+      BUILD_SOURCEBRANCH: 'refs/heads/main',
+      BUILD_SOURCEVERSION: 'abc',
+      BUILD_REASON: 'PullRequest',
+      SYSTEM_JOBATTEMPT: '3',
+    });
+    expect(p.context).toMatchObject({ ref: 'refs/heads/main', sha: 'abc', isPullRequest: true, attempt: 3 });
     const write = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
     p.setOutput('digest', 'a;b]\nc');
     expect(write).toHaveBeenCalledWith('##vso[task.setvariable variable=digest;isOutput=true]a;b]%0Ac' + os.EOL);

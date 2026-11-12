@@ -38,6 +38,21 @@ describe.runIf(supported)('run with safe-chain', () => {
     expect(p.summary).toContain('Safe Chain');
   });
 
+  it('skips the minimum package age (not malware) on a re-run', async () => {
+    const { run } = await import('../src/core/run');
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-'));
+    fs.writeFileSync(path.join(workspace, 'Dockerfile'), 'FROM node\nRUN npm ci\n');
+    const builds: string[][] = [];
+    const exec: Exec = async (_c, args) => {
+      if (args[0] === 'build') builds.push(args);
+      return { exitCode: 0, stdout: '', stderr: '' };
+    };
+    const ctx = { isPullRequest: false, tempDir: workspace, workspace, attempt: 2 };
+    await run(new FakePlatform({ image: 'reg.io/app', scan: 'false', sbom: 'false', push: 'false' }, ctx), exec);
+    const dockerfile = builds[0][builds[0].indexOf('--file') + 1];
+    expect(fs.readFileSync(dockerfile, 'utf8')).toContain('source=shims-skip-minimum-age,');
+  });
+
   it('uses the original Dockerfile when there is nothing to protect', async () => {
     const { run } = await import('../src/core/run');
     const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-'));

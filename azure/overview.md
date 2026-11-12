@@ -38,4 +38,8 @@ The task:
 
 A summary of the scan is attached to the build results page.
 
+When you **re-run a failed job**, vulnerabilities and safe-chain's minimum package age are reported as warnings
+instead of failing, because there is usually a good reason for the re-run. Known malware is always blocked. Set
+`bypassOnRerun: false` to enforce the checks on every attempt.
+
 See the [documentation](https://github.com/onek8s/container-build-extension#readme) for all options.

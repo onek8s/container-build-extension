@@ -76,6 +76,10 @@ inputs:
     description: "Ignore vulnerabilities that have no fix available."
     required: false
     default: "true"
+  bypass-on-rerun:
+    description: "When a failed job is re-run, report vulnerabilities and safe-chain's minimum package age as warnings instead of failing. Malware is always blocked."
+    required: false
+    default: "true"
   trivy-version:
     description: "Trivy version (or full scanner image reference)."
     required: false

@@ -120,6 +120,8 @@ jobs:
           image: localhost:5000/e2e/vulnerable
           context: test/fixtures/vulnerable
           push: "true"
+          # keep the check strict when this CI job itself is re-run
+          bypass-on-rerun: "false"
 
       - name: Verify vulnerable image was blocked
         env:
@@ -199,6 +201,26 @@ jobs:
           echo "$tags"
           echo "$tags" | grep -q '"latest"'
           if grep -v 'task.setsecret' "$RUNNER_TEMP/azure-vars.log" | grep -q s3cret; then echo "::error::password leaked to the log"; exit 1; fi
+
+      - name: Re-run of a failed job accepts vulnerabilities
+        env:
+          INPUT_IMAGE: localhost:5001/e2e/rerun
+          INPUT_CONTEXT: test/fixtures/vulnerable
+          INPUT_SBOM: "false"
+          CONTAINER_REGISTRY: localhost:5001
+          CONTAINER_REGISTRY_USERNAME: tester
+          SECRET_CONTAINER_REGISTRY_PASSWORD: s3cret
+          SYSTEM_JOBATTEMPT: "2"
+          BUILD_SOURCEVERSION: ${{ github.sha }}
+          BUILD_SOURCEBRANCH: refs/heads/main
+          BUILD_REASON: IndividualCI
+          BUILD_SOURCESDIRECTORY: ${{ github.workspace }}
+          AGENT_TEMPDIRECTORY: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          node azure/tasks/ContainerBuild/index.js | tee "$RUNNER_TEMP/azure-rerun.log"
+          grep -q 'accepted because this is a re-run' "$RUNNER_TEMP/azure-rerun.log"
+          curl -sf -u tester:s3cret localhost:5001/v2/e2e/rerun/tags/list | grep -q latest
 
   e2e-reusable-workflow:
     needs: check

@@ -20,12 +20,16 @@ const SHA256: Record<string, string> = {
 export const SAFE_CHAIN_CONTEXT = 'container-build-safe-chain';
 const MOUNT_DIR = '/tmp/.container-build-safe-chain';
 
-const MOUNTS = [
-  // writable, not part of the image: safe-chain keeps its malware lists and certificates here
-  `--mount=type=cache,id=${SAFE_CHAIN_CONTEXT},target=${MOUNT_DIR},mode=0777`,
-  `--mount=type=bind,from=${SAFE_CHAIN_CONTEXT},source=bin,target=${MOUNT_DIR}/bin`,
-  `--mount=type=bind,from=${SAFE_CHAIN_CONTEXT},source=shims,target=${MOUNT_DIR}/shims`,
-].join(' ');
+/** Shims that pass --safe-chain-skip-minimum-package-age; malware is still blocked. */
+const SKIP_AGE_SHIMS = 'shims-skip-minimum-age';
+
+const mounts = (shims: string) =>
+  [
+    // writable, not part of the image: safe-chain keeps its malware lists and certificates here
+    `--mount=type=cache,id=${SAFE_CHAIN_CONTEXT},target=${MOUNT_DIR},mode=0777`,
+    `--mount=type=bind,from=${SAFE_CHAIN_CONTEXT},source=bin,target=${MOUNT_DIR}/bin`,
+    `--mount=type=bind,from=${SAFE_CHAIN_CONTEXT},source=${shims},target=${MOUNT_DIR}/shims`,
+  ].join(' ');
 const PREFIX = `export PATH="${MOUNT_DIR}/shims:${MOUNT_DIR}/bin:$PATH";`;
 
 export interface InstrumentResult {
@@ -40,7 +44,8 @@ export interface InstrumentResult {
  *   RUN npm ci  ->  RUN --mount=... export PATH="<safe-chain shims>:$PATH"; npm ci
  * Exec-form RUN, heredocs and stages using a custom SHELL are left untouched.
  */
-export function instrumentDockerfile(content: string): InstrumentResult {
+export function instrumentDockerfile(content: string, opts: { skipMinimumPackageAge?: boolean } = {}): InstrumentResult {
+  const MOUNTS = mounts(opts.skipMinimumPackageAge ? SKIP_AGE_SHIMS : 'shims');
   const lines = content.split('\n');
   // parser directives (only at the very top)
   for (const line of lines) {
@@ -122,7 +127,24 @@ export async function prepareSafeChain(
     for (const k of ['GITHUB_PATH', 'BASH_ENV', 'TF_BUILD']) delete env[k];
     await exec(bin, ['setup-ci'], { silent: true, env });
   }
+  const relaxed = path.join(dir, SKIP_AGE_SHIMS);
+  if (!fs.existsSync(path.join(relaxed, 'npm'))) createSkipAgeShims(path.join(dir, 'shims'), relaxed);
   // do not ship the host CA key into the build; safe-chain creates its own inside the build
   fs.rmSync(path.join(dir, 'certs'), { recursive: true, force: true });
   return dir;
+}
+
+/** Copies the shims, adding --safe-chain-skip-minimum-package-age to every package manager call. */
+export function createSkipAgeShims(from: string, to: string): void {
+  const tmp = `${to}.tmp`;
+  fs.rmSync(tmp, { recursive: true, force: true });
+  fs.mkdirSync(tmp, { recursive: true });
+  for (const name of fs.readdirSync(from)) {
+    const src = fs.readFileSync(path.join(from, name), 'utf8');
+    const out = src.replace(/exec safe-chain (\S+) "\$@"/g, 'exec safe-chain $1 --safe-chain-skip-minimum-package-age "$@"');
+    if (out === src) throw new Error(`Unexpected safe-chain shim format: ${name}`);
+    fs.writeFileSync(path.join(tmp, name), out, { mode: 0o755 });
+  }
+  fs.rmSync(to, { recursive: true, force: true });
+  fs.renameSync(tmp, to);
 }

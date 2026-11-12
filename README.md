@@ -264,9 +264,24 @@ GitHub uses `kebab-case` names, Azure DevOps uses `camelCase` names.
 | `severity` | `severity` | `CRITICAL,HIGH` | Severities to report. |
 | `fail-on-vulnerabilities` | `failOnVulnerabilities` | `true` | Fail and skip the push when vulnerabilities are found. |
 | `ignore-unfixed` | `ignoreUnfixed` | `true` | Ignore vulnerabilities without an available fix. |
+| `bypass-on-rerun` | `bypassOnRerun` | `true` | On a re-run of a failed job, accept vulnerabilities and too-new packages (never malware). See [Re-running a failed build](#re-running-a-failed-build). |
 | `trivy-version` | `trivyVersion` | pinned | Trivy version, or a full scanner image reference (e.g. an internal mirror). |
 
 To accept specific vulnerabilities, list their IDs in a `.trivyignore` file in the build context or repository root.
+
+## Re-running a failed build
+
+When a vulnerability or safe-chain's minimum package age (a package version younger than 48 hours) fails a build,
+people normally have a good reason to re-run it, for example because a fix isn't released yet or a just-published patch
+is needed. So when a failed job is re-run (*Re-run failed jobs* on GitHub, *Rerun failed jobs* on Azure DevOps,
+detected from `GITHUB_RUN_ATTEMPT` / `System.JobAttempt`):
+
+- vulnerabilities found by the scan are reported as warnings and the image is pushed
+- package installs in the Dockerfile run with `--safe-chain-skip-minimum-package-age`
+- **known malware is still blocked**, because a second click must not let a compromised package through
+- the job log and summary state that the checks were relaxed for this attempt
+
+Set `bypass-on-rerun: false` (`bypassOnRerun: false` on Azure DevOps) to enforce the checks on every attempt.
 
 ## Outputs
 

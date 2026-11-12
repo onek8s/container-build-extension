@@ -17,6 +17,8 @@ export interface BuildContext {
   sha?: string;
   /** Git ref, e.g. refs/heads/main, refs/tags/v1.0.0, refs/pull/1/merge. */
   ref?: string;
+  /** Attempt number of the job: greater than 1 when the user re-runs it ("Re-run failed jobs"). */
+  attempt?: number;
   /** True when running for a pull request. */
   isPullRequest: boolean;
   /** Directory used for temporary files. */

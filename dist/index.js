@@ -431,6 +431,7 @@ function readInputs(platform2, machine) {
     sbom: parseBool(platform2.getInput("sbom"), true, "sbom"),
     sbomFormat,
     safeChain: parseBool(platform2.getInput("safeChain"), true, "safeChain"),
+    rerunBypass: parseBool(platform2.getInput("bypassOnRerun"), true, "bypassOnRerun") && (ctx.attempt ?? 1) > 1,
     trivyImage: trivyVersion.includes("/") ? trivyVersion : `ghcr.io/aquasecurity/trivy:${trivyVersion.replace(/^v/, "")}`
   };
 }
@@ -446,14 +447,16 @@ var SHA256 = {
 };
 var SAFE_CHAIN_CONTEXT = "container-build-safe-chain";
 var MOUNT_DIR = "/tmp/.container-build-safe-chain";
-var MOUNTS = [
+var SKIP_AGE_SHIMS = "shims-skip-minimum-age";
+var mounts = (shims) => [
   // writable, not part of the image: safe-chain keeps its malware lists and certificates here
   `--mount=type=cache,id=${SAFE_CHAIN_CONTEXT},target=${MOUNT_DIR},mode=0777`,
   `--mount=type=bind,from=${SAFE_CHAIN_CONTEXT},source=bin,target=${MOUNT_DIR}/bin`,
-  `--mount=type=bind,from=${SAFE_CHAIN_CONTEXT},source=shims,target=${MOUNT_DIR}/shims`
+  `--mount=type=bind,from=${SAFE_CHAIN_CONTEXT},source=${shims},target=${MOUNT_DIR}/shims`
 ].join(" ");
 var PREFIX = `export PATH="${MOUNT_DIR}/shims:${MOUNT_DIR}/bin:$PATH";`;
-function instrumentDockerfile(content) {
+function instrumentDockerfile(content, opts = {}) {
+  const MOUNTS = mounts(opts.skipMinimumPackageAge ? SKIP_AGE_SHIMS : "shims");
   const lines = content.split("\n");
   for (const line of lines) {
     const m = line.match(/^#\s*([a-z]+)\s*=\s*(.*)$/i);
@@ -516,8 +519,23 @@ async function prepareSafeChain(exec2, cacheDir, arch = process.arch, expected =
     for (const k of ["GITHUB_PATH", "BASH_ENV", "TF_BUILD"]) delete env[k];
     await exec2(bin, ["setup-ci"], { silent: true, env });
   }
+  const relaxed = path3.join(dir, SKIP_AGE_SHIMS);
+  if (!fs3.existsSync(path3.join(relaxed, "npm"))) createSkipAgeShims(path3.join(dir, "shims"), relaxed);
   fs3.rmSync(path3.join(dir, "certs"), { recursive: true, force: true });
   return dir;
+}
+function createSkipAgeShims(from, to) {
+  const tmp = `${to}.tmp`;
+  fs3.rmSync(tmp, { recursive: true, force: true });
+  fs3.mkdirSync(tmp, { recursive: true });
+  for (const name of fs3.readdirSync(from)) {
+    const src = fs3.readFileSync(path3.join(from, name), "utf8");
+    const out = src.replace(/exec safe-chain (\S+) "\$@"/g, 'exec safe-chain $1 --safe-chain-skip-minimum-package-age "$@"');
+    if (out === src) throw new Error(`Unexpected safe-chain shim format: ${name}`);
+    fs3.writeFileSync(path3.join(tmp, name), out, { mode: 493 });
+  }
+  fs3.rmSync(to, { recursive: true, force: true });
+  fs3.renameSync(tmp, to);
 }
 
 // src/core/scan.ts
@@ -697,7 +715,9 @@ async function prepareBuild(platform2, exec2, inputs) {
     platform2.warning(`safe-chain is only supported on Linux x64/arm64 agents; building without it.`);
     return { ...plain, safeChain: "unsupported agent" };
   }
-  const result = instrumentDockerfile(fs5.readFileSync(inputs.dockerfile, "utf8"));
+  const result = instrumentDockerfile(fs5.readFileSync(inputs.dockerfile, "utf8"), {
+    skipMinimumPackageAge: inputs.rerunBypass
+  });
   if (result.wrapped === 0) {
     platform2.info(`safe-chain: no RUN instructions to protect${result.reason ? ` (${result.reason})` : ""}.`);
     return { ...plain, safeChain: "nothing to protect" };
@@ -735,6 +755,11 @@ async function run(platform2, exec2 = exec) {
   if (ctx.sha) labels["org.opencontainers.image.revision"] = ctx.sha;
   const result = { imageRefs, pushed: false };
   const summary = [`### Container build: \`${inputs.repository}\``, "", `Tags: ${tags.map((t) => `\`${t}\``).join(", ")}`, ""];
+  if (inputs.rerunBypass) {
+    const msg = `Re-run (attempt ${ctx.attempt}): vulnerabilities found by the scan and safe-chain's minimum package age do not fail this build. Malware is still blocked.`;
+    platform2.warning(msg);
+    summary.push(`\u26A0\uFE0F ${msg}`, "");
+  }
   const build = await prepareBuild(platform2, exec2, inputs);
   await group(
     platform2,
@@ -781,11 +806,11 @@ async function run(platform2, exec2 = exec) {
         summary.push("#### Security scan", "", summaryMarkdown(scan, inputs.severity), "");
         if (scan.vulnerabilities.length > 0) {
           const msg = `Found ${scan.vulnerabilities.length} vulnerabilities with severity ${inputs.severity}`;
-          if (inputs.failOnVulnerabilities) {
+          if (inputs.failOnVulnerabilities && !inputs.rerunBypass) {
             platform2.addSummary(summary.join("\n"));
             throw new Error(`${msg}. Image was not pushed. Fix them, add them to .trivyignore, or set failOnVulnerabilities to false.`);
           }
-          platform2.warning(msg);
+          platform2.warning(inputs.rerunBypass ? `${msg}; accepted because this is a re-run` : msg);
         } else {
           platform2.info("No vulnerabilities found.");
         }
@@ -848,6 +873,7 @@ var GitHubPlatform = class {
     this.context = {
       project: owner || void 0,
       repository: repo || void 0,
+      attempt: Number(env.GITHUB_RUN_ATTEMPT) || void 0,
       sha: env.GITHUB_SHA,
       ref: env.GITHUB_REF,
       isPullRequest: ["pull_request", "pull_request_target"].includes(env.GITHUB_EVENT_NAME ?? ""),
