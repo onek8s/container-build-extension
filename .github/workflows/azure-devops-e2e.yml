@@ -1,0 +1,77 @@
+name: Azure DevOps e2e
+
+# Publishes the dev extension (onek8s.container-build-dev, task ContainerBuildDev) privately to the
+# test organization and runs test/azure-devops/e2e.yml on real Azure DevOps agents.
+# Authentication is GitHub OIDC -> Microsoft Entra service principal; no secrets are stored.
+# Enabled when the repository variable ADO_ORGANIZATION is set; see docs/azure-devops-e2e.md.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Marketplace versions must increase and the test organization has one dev extension installed
+concurrency:
+  group: azure-devops-e2e
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  azure-devops:
+    if: >-
+      vars.ADO_ORGANIZATION != '' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    environment: azure-devops-e2e
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup
+      - run: npm run build
+
+      - name: Package dev extension
+        id: package
+        run: |
+          patch=$(( GITHUB_RUN_NUMBER * 100 + GITHUB_RUN_ATTEMPT ))
+          node scripts/package-azure.mjs --dev --patch "$patch"
+          version="$(node -p "require('./package.json').version.split('.').slice(0,2).join('.')").${patch}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Sign in to Microsoft Entra ID (GitHub OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_DEVOPS_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Get Azure DevOps token
+        run: |
+          # 499b84ac-... is the Azure DevOps resource (also used for the Marketplace)
+          token=$(az account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798 --query accessToken -o tsv)
+          echo "::add-mask::${token}"
+          echo "ADO_TOKEN=${token}" >> "$GITHUB_ENV"
+
+      - name: Show service principal identity (for the Marketplace publisher members)
+        continue-on-error: true
+        run: |
+          curl -fsS -H "Authorization: Bearer ${ADO_TOKEN}" \
+            "https://app.vssps.visualstudio.com/_apis/profile/profiles/me?api-version=7.1" \
+            | jq '{id, displayName, emailAddress}'
+
+      - name: Publish dev extension
+        run: |
+          npx tfx extension publish --vsix dist-azure-dev/*.vsix \
+            --share-with "${{ vars.ADO_ORGANIZATION }}" --auth-type pat -t "$ADO_TOKEN" --no-prompt
+
+      - name: Run Azure DevOps e2e pipeline
+        env:
+          ADO_ORGANIZATION: ${{ vars.ADO_ORGANIZATION }}
+          ADO_PROJECT: ${{ vars.ADO_PROJECT }}
+          ADO_PIPELINE_ID: ${{ vars.ADO_PIPELINE_ID }}
+          ADO_MANAGED_POOL: ${{ vars.ADO_MANAGED_POOL }}
+          E2E_ACR: ${{ vars.E2E_ACR }}
+          EXPECTED_VERSION: ${{ steps.package.outputs.version }}
+          REF: ${{ github.event_name == 'pull_request' && format('refs/heads/{0}', github.head_ref) || github.ref }}
+        run: node scripts/azure-devops-e2e.mjs

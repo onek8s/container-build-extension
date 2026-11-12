@@ -9,10 +9,13 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    # GitHub OIDC subject for the Marketplace publisher's service principal
+    environment: marketplace
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup
@@ -39,7 +42,7 @@ jobs:
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
 
       - name: Package Azure DevOps extension
-        run: npx tfx extension create --root azure --manifest-globs vss-extension.json --output-path dist-azure
+        run: node scripts/package-azure.mjs
 
       - name: Create GitHub release
         env:
@@ -55,8 +58,20 @@ jobs:
           git tag -f "$major" "$GITHUB_SHA"
           git push -f origin "refs/tags/$major"
 
+      # Publishing uses GitHub OIDC -> Microsoft Entra service principal (member of the Marketplace
+      # publisher); enabled when the variable AZURE_DEVOPS_CLIENT_ID is set. See docs/azure-devops-e2e.md.
+      - name: Sign in to Microsoft Entra ID (GitHub OIDC)
+        if: vars.AZURE_DEVOPS_CLIENT_ID != ''
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_DEVOPS_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
       - name: Publish to Visual Studio Marketplace
-        env:
-          MARKETPLACE_TOKEN: ${{ secrets.AZURE_DEVOPS_MARKETPLACE_TOKEN }}
-        if: env.MARKETPLACE_TOKEN != ''
-        run: npx tfx extension publish --vsix dist-azure/*.vsix --auth-type pat --token "$MARKETPLACE_TOKEN"
+        if: vars.AZURE_DEVOPS_CLIENT_ID != ''
+        run: |
+          token=$(az account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798 --query accessToken -o tsv)
+          echo "::add-mask::${token}"
+          npx tfx extension publish --vsix dist-azure/*.vsix --auth-type pat -t "$token" --no-prompt \
+            ${{ vars.ADO_ORGANIZATION != '' && format('--share-with {0}', vars.ADO_ORGANIZATION) || '' }}

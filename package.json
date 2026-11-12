@@ -12,7 +12,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "check": "npm run typecheck && npm test && npm run build",
-    "package:azure": "npm run build && tfx extension create --root azure --manifest-globs vss-extension.json --output-path dist-azure"
+    "package:azure": "npm run build && node scripts/package-azure.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

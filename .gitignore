@@ -3,3 +3,4 @@ dist-azure/
 *.vsix
 azure/tasks/ContainerBuild/index.js
 coverage/
+dist-azure-dev/

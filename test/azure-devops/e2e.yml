@@ -1,0 +1,91 @@
+# End-to-end tests of the dev extension (ContainerBuildDev) on real Azure DevOps agents.
+# Queued by .github/workflows/azure-devops-e2e.yml; see docs/azure-devops-e2e.md for the setup.
+trigger: none
+pr: none
+
+parameters:
+  - name: acr
+    displayName: Azure Container Registry login server (e.g. myacr.azurecr.io)
+    type: string
+  - name: acrConnection
+    displayName: Docker Registry service connection (Azure Container Registry, workload identity federation)
+    type: string
+    default: e2e-acr
+  - name: armConnection
+    displayName: Azure Resource Manager service connection (workload identity federation)
+    type: string
+    default: e2e-arm
+  - name: managedPool
+    displayName: Managed DevOps Pool tagged with container-registry (empty = skip)
+    type: string
+    default: ' '
+
+jobs:
+  - job: docker_registry_connection
+    displayName: ACR via Docker Registry service connection (WIF)
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+      - task: ContainerBuildDev@0
+        name: build
+        inputs:
+          containerRegistry: ${{ parameters.acrConnection }}
+          context: test/fixtures/app
+          push: "true"
+      - bash: |
+          set -eu
+          echo "image=$(build.image) imageRef=$(build.imageRef) sbom=$(build.sbom) vulnerabilities=$(build.vulnerabilities)"
+          [[ "$(build.digest)" == sha256:* ]]
+          [[ "$(build.image)" == "${{ parameters.acr }}/"* ]]
+          [[ "$(build.vulnerabilities)" == "0" ]]
+          test -s "$(build.sbom)"
+        displayName: Verify output variables
+
+  - job: arm_connection
+    displayName: ACR via Azure Resource Manager service connection (WIF)
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+      - task: ContainerBuildDev@0
+        name: build
+        inputs:
+          azureSubscription: ${{ parameters.armConnection }}
+          registry: ${{ parameters.acr }}/e2e-arm
+          context: test/fixtures/app
+          push: "true"
+          scan: "false"
+      - bash: '[[ "$(build.digest)" == sha256:* ]]'
+        displayName: Verify push
+
+  - job: malware_blocked
+    displayName: Malicious package is blocked by safe-chain
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+      - task: ContainerBuildDev@0
+        continueOnError: true
+        inputs:
+          image: ${{ parameters.acr }}/e2e/malicious
+          containerRegistry: ${{ parameters.acrConnection }}
+          context: test/fixtures/malicious
+          push: "true"
+      - bash: |
+          echo "job status: $(Agent.JobStatus)"
+          [ "$(Agent.JobStatus)" = "SucceededWithIssues" ]
+        displayName: Verify the build failed
+
+  - ${{ if ne(trim(parameters.managedPool), '') }}:
+      - job: managed_pool
+        displayName: Zero-config on a Managed DevOps Pool (VM tags + managed identity)
+        pool: ${{ trim(parameters.managedPool) }}
+        steps:
+          - task: ContainerBuildDev@0
+            name: build
+            inputs:
+              context: test/fixtures/app
+              push: "true"
+          - bash: |
+              set -eu
+              [[ "$(build.image)" == "${{ parameters.acr }}/"* ]]
+              [[ "$(build.digest)" == sha256:* ]]
+            displayName: Verify registry from VM tag and push with managed identity
