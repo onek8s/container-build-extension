@@ -1,4 +1,25 @@
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import type { Exec } from './exec';
+
+/** True when the docker client config already holds credentials for the registry. */
+export function hasDockerLogin(registry: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  const file = path.join(env.DOCKER_CONFIG || path.join(os.homedir(), '.docker'), 'config.json');
+  try {
+    const config = JSON.parse(fs.readFileSync(file, 'utf8')) as {
+      auths?: Record<string, unknown>;
+      credHelpers?: Record<string, string>;
+    };
+    const host = (k: string) => k.replace(/^[a-z]+:\/\//, '').split('/')[0].toLowerCase();
+    return (
+      Object.keys(config.auths ?? {}).some((k) => host(k) === registry) ||
+      Object.keys(config.credHelpers ?? {}).some((k) => host(k) === registry)
+    );
+  } catch {
+    return false;
+  }
+}
 import type { RegistryCredentials } from './platform';
 
 export class Docker {

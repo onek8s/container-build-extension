@@ -38,6 +38,12 @@ inputs:
   password:
     description: "Registry password or token."
     required: false
+  azure-client-id:
+    description: "Client id of the Entra app / user-assigned managed identity for Azure Container Registry (GitHub OIDC or managed identity). Default: AZURE_CLIENT_ID environment variable."
+    required: false
+  azure-tenant-id:
+    description: "Tenant id for GitHub OIDC with Azure. Default: AZURE_TENANT_ID environment variable."
+    required: false
   github-token:
     description: "Token used for ghcr.io when no password is given. Requires 'packages: write' permission."
     required: false

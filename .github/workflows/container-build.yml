@@ -2,9 +2,15 @@
 #   variable CONTAINER_REGISTRY            e.g. myacr.azurecr.io (default: ghcr.io)
 #   variable CONTAINER_REGISTRY_USERNAME   (or secret with the same name)
 #   secret   CONTAINER_REGISTRY_PASSWORD
+# or, for Azure Container Registry with GitHub OIDC (no password):
+#   variables AZURE_CLIENT_ID and AZURE_TENANT_ID
 # and call it from any repository with:
 #   jobs:
 #     build:
+#       permissions:
+#         contents: read
+#         packages: write   # ghcr.io
+#         id-token: write   # Azure (OIDC)
 #       uses: onek8s/container-build-extension/.github/workflows/container-build.yml@v0
 #       secrets: inherit
 name: Container build
@@ -66,6 +72,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
     outputs:
       image: ${{ steps.build.outputs.image }}
       image-ref: ${{ steps.build.outputs.image-ref }}
@@ -85,14 +92,22 @@ jobs:
           persist-credentials: false
       - name: Use the repository's .trivyignore
         run: if [ -f source/.trivyignore ]; then cp source/.trivyignore .trivyignore; fi
-      - name: Build, scan and push
-        id: build
-        uses: ./.container-build-action
+      # Only export settings that are configured, so variables provided by self-hosted runners
+      # (runner .env, AKS workload identity) are not hidden by empty values.
+      - name: Registry settings
         env:
-          # credentials are only used for the registry named in CONTAINER_REGISTRY
           CONTAINER_REGISTRY: ${{ vars.CONTAINER_REGISTRY }}
           CONTAINER_REGISTRY_USERNAME: ${{ vars.CONTAINER_REGISTRY_USERNAME || secrets.CONTAINER_REGISTRY_USERNAME }}
           CONTAINER_REGISTRY_PASSWORD: ${{ secrets.CONTAINER_REGISTRY_PASSWORD }}
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+        run: |
+          for name in CONTAINER_REGISTRY CONTAINER_REGISTRY_USERNAME CONTAINER_REGISTRY_PASSWORD AZURE_CLIENT_ID AZURE_TENANT_ID; do
+            if [ -n "${!name}" ]; then echo "${name}=${!name}" >> "$GITHUB_ENV"; fi
+          done
+      - name: Build, scan and push
+        id: build
+        uses: ./.container-build-action
         with:
           image: ${{ inputs.image }}
           context: source/${{ inputs.context }}

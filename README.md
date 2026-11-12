@@ -65,6 +65,7 @@ jobs:
     permissions:
       contents: read
       packages: write   # only needed for ghcr.io
+      id-token: write   # only needed for Azure (OIDC)
     uses: onek8s/container-build-extension/.github/workflows/container-build.yml@v0
     secrets: inherit
 ```
@@ -119,8 +120,8 @@ steps:
 To apply this to every pipeline centrally, put the step (and the variable group) in a shared template and use
 `extends:` or `template:` from your pipelines.
 
-For workload identity federation or managed identity, log in with `AzureCLI@2` (`az acr login -n myacr`) in a previous
-step and set `registry` or `image`.
+For Azure Container Registry with workload identity federation or managed identity, see
+[Azure Container Registry without passwords](#azure-container-registry-without-passwords).
 
 Output variables are available as `$(<stepName>.digest)` etc. when the step has a `name:`.
 The SBOM is published automatically as the `sbom` pipeline artifact.
@@ -135,6 +136,84 @@ On GitHub (when using the action directly), upload the SBOM with:
       name: sbom
       path: ${{ steps.build.outputs.sbom }}
 ```
+
+## Azure Container Registry without passwords
+
+For Azure Container Registry (`*.azurecr.io`) the extension logs in with a Microsoft Entra identity, the same way as
+`az acr login` (Entra token → ACR refresh token → `docker login`), without needing the Azure CLI. The identity needs the
+**AcrPush** role on the registry. When no username/password is configured, the first available identity is used:
+
+| # | Identity | Azure DevOps | GitHub |
+|---|---|---|---|
+| 1 | Service connection / OIDC | Docker Registry (Azure Container Registry) or Azure Resource Manager service connection with **workload identity federation**, managed identity or service principal | **GitHub OIDC** with `AZURE_CLIENT_ID` + `AZURE_TENANT_ID` and `permissions: id-token: write` |
+| 2 | Existing `docker login` | kept as is (e.g. `az acr login` in a previous step) | kept as is |
+| 3 | AKS workload identity | agents running in AKS pods with workload identity (`AZURE_FEDERATED_TOKEN_FILE`) | runners in AKS pods (e.g. Actions Runner Controller) |
+| 4 | Managed identity | self-hosted agents on Azure VMs / VM scale sets (`AZURE_CLIENT_ID` selects a user-assigned identity) | self-hosted runners on Azure VMs / VM scale sets |
+
+### Self-hosted agents and runners
+
+With a managed identity or AKS workload identity on the agent pool, configure only the registry, for example in the
+agent's or runner's `.env` file (or as a pipeline / organization variable):
+
+```
+CONTAINER_REGISTRY=myacr.azurecr.io
+```
+
+and the pipelines need nothing else:
+
+```yaml
+# Azure Pipelines
+pool: my-self-hosted-pool
+steps:
+  - task: ContainerBuild@0
+```
+
+```yaml
+# GitHub Actions
+jobs:
+  build:
+    runs-on: [self-hosted, linux]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: onek8s/container-build-extension@v0
+```
+
+The agents need outbound access to `login.microsoftonline.com` (not for managed identity) and the registry; the
+instance metadata endpoint `169.254.169.254` is always called without proxy.
+
+### Azure DevOps with workload identity federation
+
+Create a *Docker Registry → Azure Container Registry* service connection with *Workload Identity federation*, then:
+
+```yaml
+steps:
+  - task: ContainerBuild@0
+    inputs:
+      containerRegistry: my-acr-connection
+```
+
+An *Azure Resource Manager* service connection works too: set `azureSubscription: my-arm-connection` and
+`registry: myacr.azurecr.io`.
+
+### GitHub OIDC
+
+Add a federated credential for your repositories to an Entra app registration or user-assigned managed identity (subject e.g.
+`repo:my-org/my-repo:ref:refs/heads/main`), grant it AcrPush, and set the organization variables
+`CONTAINER_REGISTRY`, `AZURE_CLIENT_ID` and `AZURE_TENANT_ID`. With the reusable workflow:
+
+```yaml
+jobs:
+  build:
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    uses: onek8s/container-build-extension/.github/workflows/container-build.yml@v0
+    secrets: inherit
+```
+
+Or with the action directly: `permissions: id-token: write` and `azure-client-id` / `azure-tenant-id` inputs (or the
+`AZURE_CLIENT_ID` / `AZURE_TENANT_ID` environment variables).
 
 ## Supply chain protection with Aikido Safe Chain
 
@@ -162,6 +241,7 @@ GitHub uses `kebab-case` names, Azure DevOps uses `camelCase` names.
 |---|---|---|---|
 | `image` | `image` | automatic | Image name, a name below the registry, or empty for [automatic naming](#image-naming). |
 | `registry` | `registry` | see [Image naming](#image-naming) | Registry (and namespace) for automatic image names. |
+| `azure-client-id` / `azure-tenant-id` | `azureSubscription` | | Entra identity for [Azure Container Registry](#azure-container-registry-without-passwords). |
 | `username` / `password` | `containerRegistry` | | Registry credentials. Defaults to the [`CONTAINER_REGISTRY*` variables](#configure-the-registry-once); on GitHub, `ghcr.io` uses `github-token`. Otherwise an existing `docker login` is used. |
 | `tags` | `tags` | automatic | Comma or newline separated tags. |
 | `context` | `context` | `.` | Build context. |

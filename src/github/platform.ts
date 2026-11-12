@@ -1,5 +1,8 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
+import type { AzureIdentity } from '../core/azure';
+import { exec as defaultExec, type Exec } from '../core/exec';
+import { httpRequest } from '../core/http';
 import type { BuildContext, Platform, RegistryCredentials } from '../core/platform';
 
 const kebab = (name: string) => name.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`);
@@ -13,7 +16,10 @@ export class GitHubPlatform implements Platform {
   readonly name = 'GitHub Actions';
   readonly context: BuildContext;
 
-  constructor(private readonly env: NodeJS.ProcessEnv = process.env) {
+  constructor(
+    private readonly env: NodeJS.ProcessEnv = process.env,
+    private readonly exec: Exec = defaultExec,
+  ) {
     const [owner, repo] = (env.GITHUB_REPOSITORY ?? '').split('/');
     this.context = {
       project: owner || undefined,
@@ -47,14 +53,49 @@ export class GitHubPlatform implements Platform {
     const password = this.getInput('password');
     if (!password) return undefined;
     if (!username) throw new Error("Input 'username' is required when 'password' is set");
-    return { registry, username, password };
+    return { registry, username, password, source: 'username/password inputs' };
+  }
+
+  /**
+   * GitHub OIDC federated with a Microsoft Entra app registration or user-assigned managed identity.
+   * Needs `permissions: id-token: write` and the client/tenant id (inputs or AZURE_CLIENT_ID/AZURE_TENANT_ID).
+   */
+  getAzureIdentity(): AzureIdentity | undefined {
+    const explicitClientId = this.getInput('azureClientId');
+    const clientId = explicitClientId ?? this.getVariable('AZURE_CLIENT_ID');
+    const tenantId = this.getInput('azureTenantId') ?? this.getVariable('AZURE_TENANT_ID');
+    const requestUrl = this.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+    const requestToken = this.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
+    if (!clientId || !tenantId) return undefined;
+    // runner pod with AKS workload identity: let the core use the injected token instead
+    if (!explicitClientId && this.env.AZURE_FEDERATED_TOKEN_FILE) return undefined;
+    if (!requestUrl || !requestToken) {
+      this.info("No GitHub OIDC token available (add 'permissions: id-token: write' to use it for Azure).");
+      return undefined;
+    }
+    return {
+      kind: 'federated',
+      source: 'GitHub OIDC',
+      clientId,
+      tenantId,
+      authorityHost: this.getVariable('AZURE_AUTHORITY_HOST'),
+      getAssertion: async () => {
+        const sep = requestUrl.includes('?') ? '&' : '?';
+        const r = await httpRequest<{ value?: string }>(this.exec, {
+          url: `${requestUrl}${sep}audience=${encodeURIComponent('api://AzureADTokenExchange')}`,
+          headers: { Authorization: `Bearer ${requestToken}` },
+        });
+        if (!r.value) throw new Error('GitHub did not return an OIDC token');
+        return r.value;
+      },
+    };
   }
 
   /** Zero-config GitHub Container Registry: use the workflow token. */
   getFallbackCredentials(registry: string): RegistryCredentials | undefined {
     const token = this.getInput('githubToken');
     if (registry !== 'ghcr.io' || !token) return undefined;
-    return { registry, username: this.getInput('username') ?? this.env.GITHUB_ACTOR ?? 'github-actions', password: token };
+    return { registry, username: this.getInput('username') ?? this.env.GITHUB_ACTOR ?? 'github-actions', password: token, source: 'GITHUB_TOKEN' };
   }
 
   debug(message: string): void {

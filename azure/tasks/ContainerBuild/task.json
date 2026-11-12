@@ -47,6 +47,13 @@
       "helpMarkDown": "Docker Registry service connection used for push; its registry is also the default for automatic image names. Leave empty to use the `CONTAINER_REGISTRY`, `CONTAINER_REGISTRY_USERNAME` and `CONTAINER_REGISTRY_PASSWORD` variables (e.g. from a variable group) or an existing docker login."
     },
     {
+      "name": "azureSubscription",
+      "type": "connectedService:AzureRM",
+      "label": "Azure service connection",
+      "required": false,
+      "helpMarkDown": "Azure Resource Manager service connection (workload identity federation, managed identity or service principal) used to log in to Azure Container Registry. Not needed with an Azure Container Registry service connection or when the agent has a managed identity / AKS workload identity."
+    },
+    {
       "name": "registry",
       "type": "string",
       "label": "Registry",

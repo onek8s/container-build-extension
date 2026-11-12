@@ -185,6 +185,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
     uses: ./.github/workflows/container-build.yml
     with:
       context: test/fixtures/app
@@ -205,3 +206,25 @@ jobs:
           echo "image=$IMAGE tags=$TAGS"
           [[ "$IMAGE" == */"${REPO,,}" ]]
           [[ "$TAGS" == *"$IMAGE:"* ]]
+
+  # Optional: real push to Azure Container Registry with GitHub OIDC. Enable by setting the repository
+  # variables E2E_ACR (e.g. myacr.azurecr.io), AZURE_CLIENT_ID and AZURE_TENANT_ID, with a federated
+  # credential for this repository and the AcrPush role on the registry.
+  e2e-acr-oidc:
+    needs: check
+    if: vars.E2E_ACR != '' && github.event_name != 'pull_request' || vars.E2E_ACR != '' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./
+        id: build
+        with:
+          registry: ${{ vars.E2E_ACR }}
+          context: test/fixtures/app
+          push: "true"
+          azure-client-id: ${{ vars.AZURE_CLIENT_ID }}
+          azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
+      - run: '[[ "${{ steps.build.outputs.digest }}" == sha256:* ]]'

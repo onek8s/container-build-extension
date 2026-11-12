@@ -1,3 +1,4 @@
+import type { AzureIdentity } from '../src/core/azure';
 import type { BuildContext, Platform, RegistryCredentials } from '../src/core/platform';
 
 export class FakePlatform implements Platform {
@@ -19,6 +20,7 @@ export class FakePlatform implements Platform {
   }
   variables: Record<string, string> = {};
   getFallbackCredentials?: (registry: string) => RegistryCredentials | undefined;
+  getAzureIdentity?: (registry: string) => AzureIdentity | undefined;
   defaultRegistry?: string;
   getVariable(name: string) {
     return this.variables[name];

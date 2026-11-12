@@ -1,6 +1,9 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import type { AzureIdentity } from '../core/azure';
+import { exec as defaultExec, type Exec } from '../core/exec';
+import { httpRequest } from '../core/http';
 import type { BuildContext, Platform, RegistryCredentials } from '../core/platform';
 
 function escapeData(s: string): string {
@@ -20,7 +23,10 @@ export class AzurePlatform implements Platform {
   private readonly endpointVars = new Map<string, string>();
   private readonly secretVars = new Map<string, string>();
 
-  constructor(private readonly env: NodeJS.ProcessEnv = process.env) {
+  constructor(
+    private readonly env: NodeJS.ProcessEnv = process.env,
+    private readonly exec: Exec = defaultExec,
+  ) {
     // Move service connection secrets out of the environment so child processes don't inherit them.
     for (const key of Object.keys(env)) {
       if (key.toUpperCase().startsWith('ENDPOINT_')) {
@@ -82,24 +88,75 @@ export class AzurePlatform implements Platform {
     const registryType = this.endpoint('DATA', id, 'registrytype');
 
     if (registryType === 'ACR' || scheme === 'serviceprincipal') {
+      // workload identity federation / managed identity connections are handled by getAzureIdentity
+      if (scheme === 'workloadidentityfederation' || scheme === 'managedserviceidentity') return undefined;
       const loginServer = this.endpoint('AUTH_PARAMETER', id, 'loginServer') ?? registry;
       const username = this.endpoint('AUTH_PARAMETER', id, 'serviceprincipalid');
       const password = this.endpoint('AUTH_PARAMETER', id, 'serviceprincipalkey');
       if (!username || !password) {
-        throw new Error(
-          `Service connection uses authentication scheme '${scheme || 'unknown'}', which is not supported. ` +
-            'Use an Azure Container Registry connection with a service principal, a "Docker Registry" connection ' +
-            "with username/password, or run 'az acr login' in a previous step and leave containerRegistry empty.",
-        );
+        throw new Error(`Service connection uses authentication scheme '${scheme || 'unknown'}', which is not supported.`);
       }
-      return { registry: loginServer.toLowerCase(), username, password };
+      return { registry: loginServer.toLowerCase(), username, password, source: 'service connection' };
     }
 
     const username = this.endpoint('AUTH_PARAMETER', id, 'username');
     const password = this.endpoint('AUTH_PARAMETER', id, 'password');
     if (!username || !password) throw new Error(`Service connection '${id}' has no username/password`);
     const url = this.endpoint('AUTH_PARAMETER', id, 'registry') ?? this.endpoint('URL', id) ?? registry;
-    return { registry: url, username, password };
+    return { registry: url, username, password, source: 'service connection' };
+  }
+
+  /**
+   * Entra identity from a Docker Registry (Azure Container Registry) or Azure Resource Manager service
+   * connection using workload identity federation, managed identity or a service principal secret.
+   */
+  getAzureIdentity(): AzureIdentity | undefined {
+    for (const input of ['containerRegistry', 'azureSubscription']) {
+      const id = this.getInput(input);
+      if (!id) continue;
+      const scheme = (this.endpoint('AUTH_SCHEME', id) ?? '').toLowerCase();
+      if (input === 'containerRegistry' && this.endpoint('DATA', id, 'registrytype') !== 'ACR') continue;
+      const tenantId = this.endpoint('AUTH_PARAMETER', id, 'tenantid');
+      const clientId = this.endpoint('AUTH_PARAMETER', id, 'serviceprincipalid');
+      const authorityHost = this.endpoint('DATA', id, 'environmentAuthorityUrl');
+      const source = `service connection '${input}' (${scheme || 'unknown scheme'})`;
+
+      if (scheme === 'managedserviceidentity') return { kind: 'managed', source };
+      if (!tenantId || !clientId) {
+        if (input === 'containerRegistry') continue; // username/password ACR connection
+        throw new Error(`Service connection '${input}' has no tenant or service principal id`);
+      }
+      if (scheme === 'workloadidentityfederation') {
+        return { kind: 'federated', source, tenantId, clientId, authorityHost, getAssertion: () => this.oidcToken(id) };
+      }
+      const clientSecret = this.endpoint('AUTH_PARAMETER', id, 'serviceprincipalkey');
+      if (input === 'azureSubscription' && scheme === 'serviceprincipal' && clientSecret) {
+        return { kind: 'secret', source, tenantId, clientId, clientSecret, authorityHost };
+      }
+      if (input === 'azureSubscription') {
+        throw new Error(`Authentication scheme '${scheme}' of service connection '${input}' is not supported.`);
+      }
+    }
+    return undefined;
+  }
+
+  /** Requests the OIDC token of a workload identity federation service connection for this job. */
+  private async oidcToken(serviceConnectionId: string): Promise<string> {
+    const accessToken = this.endpoint('AUTH_PARAMETER', 'SYSTEMVSSCONNECTION', 'ACCESSTOKEN') ?? this.env.SYSTEM_ACCESSTOKEN;
+    if (!accessToken) throw new Error('System.AccessToken is not available to the task');
+    let url = this.env.SYSTEM_OIDCREQUESTURI;
+    if (!url) {
+      const e = this.env;
+      url = `${(e.SYSTEM_COLLECTIONURI ?? '').replace(/\/+$/, '')}/${e.SYSTEM_TEAMPROJECTID}/_apis/distributedtask/hubs/${e.SYSTEM_HOSTTYPE}/plans/${e.SYSTEM_PLANID}/jobs/${e.SYSTEM_JOBID}/oidctoken`;
+    }
+    const r = await httpRequest<{ oidcToken?: string }>(this.exec, {
+      url: `${url}?api-version=7.1&serviceConnectionId=${encodeURIComponent(serviceConnectionId)}`,
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken}` },
+      json: {},
+    });
+    if (!r.oidcToken) throw new Error('Azure DevOps did not return an OIDC token for the service connection');
+    return r.oidcToken;
   }
 
   private command(name: string, props: Record<string, string>, message: string): void {

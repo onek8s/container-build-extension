@@ -23,10 +23,157 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 ));
 
 // src/core/run.ts
-var fs3 = __toESM(require("node:fs"));
-var path4 = __toESM(require("node:path"));
+var fs5 = __toESM(require("node:fs"));
+var path5 = __toESM(require("node:path"));
+
+// src/core/azure.ts
+var fs = __toESM(require("node:fs"));
+
+// src/core/http.ts
+var quote = (s) => `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n")}"`;
+async function httpRequest(exec2, req) {
+  const lines = [`url = ${quote(req.url)}`, `request = ${quote(req.method ?? (req.form || req.json ? "POST" : "GET"))}`];
+  for (const [k, v] of Object.entries(req.headers ?? {})) lines.push(`header = ${quote(`${k}: ${v}`)}`);
+  if (req.form) {
+    const body = Object.entries(req.form).filter((e) => e[1] !== void 0).map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&");
+    lines.push(`header = "Content-Type: application/x-www-form-urlencoded"`, `data = ${quote(body)}`);
+  } else if (req.json !== void 0) {
+    lines.push(`header = "Content-Type: application/json"`, `data = ${quote(JSON.stringify(req.json))}`);
+  }
+  const args = ["-sS", "--fail-with-body", "--retry", "2", "--max-time", String(req.timeoutSeconds ?? 30), "--config", "-"];
+  if (req.noProxy) args.unshift("--noproxy", "*");
+  const host = new URL(req.url).host;
+  const r = await exec2("curl", args, { input: lines.join("\n") + "\n", silent: true, ignoreReturnCode: true });
+  if (r.exitCode !== 0) {
+    const detail = r.stdout.trim().substring(0, 500) || r.stderr.trim();
+    throw new Error(`HTTP request to ${host} failed (curl exit code ${r.exitCode}): ${detail}`);
+  }
+  try {
+    return JSON.parse(r.stdout);
+  } catch {
+    throw new Error(`HTTP request to ${host} returned an invalid response`);
+  }
+}
+
+// src/core/azure.ts
+var ARM_RESOURCE = "https://management.azure.com/";
+var DEFAULT_AUTHORITY = "https://login.microsoftonline.com";
+var IMDS = "http://169.254.169.254/metadata/identity/oauth2/token";
+var ACR_TOKEN_USERNAME = "00000000-0000-0000-0000-000000000000";
+var isAcr = (registry) => /^[a-z0-9-]+\.azurecr\.[a-z.]+$/.test(registry.toLowerCase());
+function workloadIdentityFromEnv(env) {
+  const file = env.AZURE_FEDERATED_TOKEN_FILE;
+  if (!file || !env.AZURE_CLIENT_ID || !env.AZURE_TENANT_ID) return void 0;
+  return {
+    kind: "federated",
+    source: "AKS workload identity",
+    tenantId: env.AZURE_TENANT_ID,
+    clientId: env.AZURE_CLIENT_ID,
+    authorityHost: env.AZURE_AUTHORITY_HOST,
+    getAssertion: async () => fs.readFileSync(file, "utf8").trim()
+  };
+}
+function jwtClaims(token) {
+  try {
+    return JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString("utf8"));
+  } catch {
+    return {};
+  }
+}
+async function getEntraToken(exec2, identity, mask) {
+  let token;
+  if (identity.kind === "managed") {
+    const query = new URLSearchParams({ "api-version": "2018-02-01", resource: ARM_RESOURCE });
+    if (identity.clientId) query.set("client_id", identity.clientId);
+    const r = await httpRequest(exec2, {
+      url: `${IMDS}?${query}`,
+      headers: { Metadata: "true" },
+      noProxy: true,
+      timeoutSeconds: 10
+    });
+    token = r.access_token;
+  } else {
+    const authority = (identity.authorityHost || DEFAULT_AUTHORITY).replace(/\/+$/, "");
+    const form = {
+      client_id: identity.clientId,
+      scope: `${ARM_RESOURCE}.default`,
+      grant_type: "client_credentials"
+    };
+    if (identity.kind === "federated") {
+      const assertion = await identity.getAssertion();
+      mask(assertion);
+      form.client_assertion_type = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
+      form.client_assertion = assertion;
+    } else {
+      form.client_secret = identity.clientSecret;
+    }
+    const r = await httpRequest(exec2, {
+      url: `${authority}/${encodeURIComponent(identity.tenantId)}/oauth2/v2.0/token`,
+      form
+    });
+    token = r.access_token;
+  }
+  if (!token) throw new Error(`No access token received for ${identity.source}`);
+  mask(token);
+  return token;
+}
+async function exchangeAcrToken(exec2, registry, accessToken, mask) {
+  const tenant = jwtClaims(accessToken).tid;
+  const r = await httpRequest(exec2, {
+    url: `https://${registry}/oauth2/exchange`,
+    form: { grant_type: "access_token", service: registry, tenant, access_token: accessToken }
+  });
+  if (!r.refresh_token) throw new Error(`${registry} did not return a refresh token`);
+  mask(r.refresh_token);
+  return r.refresh_token;
+}
+async function acrCredentials(exec2, registry, identity, mask) {
+  try {
+    const accessToken = await getEntraToken(exec2, identity, mask);
+    const refreshToken = await exchangeAcrToken(exec2, registry, accessToken, mask);
+    return { registry, username: ACR_TOKEN_USERNAME, password: refreshToken, source: identity.source };
+  } catch (err) {
+    throw new Error(
+      `Azure Container Registry login with ${identity.source} failed: ${err.message}. Make sure the identity has the AcrPush role on ${registry}.`
+    );
+  }
+}
+async function hasManagedIdentity(exec2) {
+  const r = await exec2(
+    "curl",
+    [
+      "-sS",
+      "--noproxy",
+      "*",
+      "--max-time",
+      "2",
+      "-o",
+      "/dev/null",
+      "-w",
+      "%{http_code}",
+      "-H",
+      "Metadata: true",
+      "http://169.254.169.254/metadata/instance?api-version=2021-02-01"
+    ],
+    { silent: true, ignoreReturnCode: true }
+  );
+  return r.stdout.trim() === "200";
+}
 
 // src/core/docker.ts
+var fs2 = __toESM(require("node:fs"));
+var os = __toESM(require("node:os"));
+var path = __toESM(require("node:path"));
+function hasDockerLogin(registry, env = process.env) {
+  const file = path.join(env.DOCKER_CONFIG || path.join(os.homedir(), ".docker"), "config.json");
+  try {
+    const config = JSON.parse(fs2.readFileSync(file, "utf8"));
+    const host = (k) => k.replace(/^[a-z]+:\/\//, "").split("/")[0].toLowerCase();
+    return Object.keys(config.auths ?? {}).some((k) => host(k) === registry) || Object.keys(config.credHelpers ?? {}).some((k) => host(k) === registry);
+  } catch {
+    return false;
+  }
+}
 var Docker = class {
   constructor(exec2) {
     this.exec = exec2;
@@ -108,7 +255,7 @@ var exec = (command, args, options = {}) => new Promise((resolve2, reject) => {
 });
 
 // src/core/inputs.ts
-var path = __toESM(require("node:path"));
+var path2 = __toESM(require("node:path"));
 
 // src/core/registry.ts
 var VAR_REGISTRY = "CONTAINER_REGISTRY";
@@ -151,14 +298,14 @@ function resolveImage(platform2) {
   if (!registry) {
     throw new Error(`Input 'image' is required when no registry is configured (input 'registry' or variable ${VAR_REGISTRY}).`);
   }
-  const path5 = defaultImagePath(platform2.context, registry);
-  if (!path5) throw new Error("Cannot derive the image name from the repository; set input 'image'.");
+  const path6 = defaultImagePath(platform2.context, registry);
+  if (!path6) throw new Error("Cannot derive the image name from the repository; set input 'image'.");
   if (registryHost(registry) === "docker.io" && !registry.includes("/")) {
     throw new Error("Docker Hub needs a namespace: set registry to 'docker.io/<namespace>' or set input 'image'.");
   }
-  return `${registry}/${path5}`;
+  return `${registry}/${path6}`;
 }
-function resolveCredentials(platform2, registry) {
+async function resolveCredentials(platform2, registry, opts) {
   const explicit = platform2.getCredentials(registry);
   if (explicit) return explicit;
   const configured = platform2.getVariable(VAR_REGISTRY);
@@ -166,7 +313,19 @@ function resolveCredentials(platform2, registry) {
   if (password && configured && registryHost(configured) === registryHost(registry)) {
     const username = platform2.getVariable(VAR_USERNAME);
     if (!username) throw new Error(`${VAR_USERNAME} is required when ${VAR_PASSWORD} is set`);
-    return { registry: registryHost(configured), username, password };
+    return { registry: registryHost(configured), username, password, source: "CONTAINER_REGISTRY_* variables" };
+  }
+  if (isAcr(registry)) {
+    const mask = (v) => platform2.setSecret(v);
+    const identity = platform2.getAzureIdentity?.(registry);
+    if (identity) return acrCredentials(opts.exec, registry, identity, mask);
+    if (opts.hasExistingLogin?.(registry)) return void 0;
+    const workload = workloadIdentityFromEnv(opts.env ?? process.env);
+    if (workload) return acrCredentials(opts.exec, registry, workload, mask);
+    if (await hasManagedIdentity(opts.exec)) {
+      const clientId = platform2.getInput("azureClientId") ?? (opts.env ?? process.env).AZURE_CLIENT_ID;
+      return acrCredentials(opts.exec, registry, { kind: "managed", source: "managed identity", clientId }, mask);
+    }
   }
   return platform2.getFallbackCredentials?.(registry);
 }
@@ -208,9 +367,9 @@ function readInputs(platform2) {
   const { context: ctx } = platform2;
   const image = resolveImage(platform2);
   const { registry, repository } = parseImage(image);
-  const context = path.resolve(ctx.workspace, platform2.getInput("context") ?? ".");
+  const context = path2.resolve(ctx.workspace, platform2.getInput("context") ?? ".");
   const dockerfileInput = platform2.getInput("dockerfile");
-  const dockerfile = dockerfileInput ? path.resolve(ctx.workspace, dockerfileInput) : path.join(context, "Dockerfile");
+  const dockerfile = dockerfileInput ? path2.resolve(ctx.workspace, dockerfileInput) : path2.join(context, "Dockerfile");
   const pushMode = (platform2.getInput("push") ?? "auto").toLowerCase();
   let push;
   if (pushMode === "auto") push = !ctx.isPullRequest;
@@ -247,8 +406,8 @@ function readInputs(platform2) {
 
 // src/core/safechain.ts
 var import_node_crypto = require("node:crypto");
-var fs = __toESM(require("node:fs"));
-var path2 = __toESM(require("node:path"));
+var fs3 = __toESM(require("node:fs"));
+var path3 = __toESM(require("node:path"));
 var SAFE_CHAIN_VERSION = "1.5.29";
 var SHA256 = {
   x64: "0a7287bbf5562610e1c4881b928037378c97b4ba7578694287b2ad3b7140b033",
@@ -301,38 +460,38 @@ function instrumentDockerfile(content) {
   return { content: lines.join("\n"), wrapped, skipped };
 }
 function sha256(file) {
-  return (0, import_node_crypto.createHash)("sha256").update(fs.readFileSync(file)).digest("hex");
+  return (0, import_node_crypto.createHash)("sha256").update(fs3.readFileSync(file)).digest("hex");
 }
 async function prepareSafeChain(exec2, cacheDir, arch = process.arch, expected = SHA256[arch]) {
   if (!expected) throw new Error(`safe-chain is not available for architecture '${arch}'`);
-  const dir = path2.join(cacheDir, "container-build-safe-chain", SAFE_CHAIN_VERSION, arch);
-  const bin = path2.join(dir, "bin", "safe-chain");
-  if (!fs.existsSync(bin) || sha256(bin) !== expected) {
-    fs.rmSync(dir, { recursive: true, force: true });
-    fs.mkdirSync(path2.dirname(bin), { recursive: true });
+  const dir = path3.join(cacheDir, "container-build-safe-chain", SAFE_CHAIN_VERSION, arch);
+  const bin = path3.join(dir, "bin", "safe-chain");
+  if (!fs3.existsSync(bin) || sha256(bin) !== expected) {
+    fs3.rmSync(dir, { recursive: true, force: true });
+    fs3.mkdirSync(path3.dirname(bin), { recursive: true });
     const url = `https://github.com/AikidoSec/safe-chain/releases/download/${SAFE_CHAIN_VERSION}/safe-chain-linuxstatic-${arch}`;
     const tmp = `${bin}.download`;
     await exec2("curl", ["-fsSL", "--retry", "3", "-o", tmp, url], { silent: true });
     const actual = sha256(tmp);
     if (actual !== expected) {
-      fs.rmSync(tmp, { force: true });
+      fs3.rmSync(tmp, { force: true });
       throw new Error(`Checksum mismatch for ${url}: expected ${expected}, got ${actual}`);
     }
-    fs.chmodSync(tmp, 493);
-    fs.renameSync(tmp, bin);
+    fs3.chmodSync(tmp, 493);
+    fs3.renameSync(tmp, bin);
   }
-  if (!fs.existsSync(path2.join(dir, "shims", "npm"))) {
+  if (!fs3.existsSync(path3.join(dir, "shims", "npm"))) {
     const env = { ...process.env };
     for (const k of ["GITHUB_PATH", "BASH_ENV", "TF_BUILD"]) delete env[k];
     await exec2(bin, ["setup-ci"], { silent: true, env });
   }
-  fs.rmSync(path2.join(dir, "certs"), { recursive: true, force: true });
+  fs3.rmSync(path3.join(dir, "certs"), { recursive: true, force: true });
   return dir;
 }
 
 // src/core/scan.ts
-var fs2 = __toESM(require("node:fs"));
-var path3 = __toESM(require("node:path"));
+var fs4 = __toESM(require("node:fs"));
+var path4 = __toESM(require("node:path"));
 function parseTrivyReport(json) {
   const report = JSON.parse(json);
   const out = [];
@@ -362,7 +521,7 @@ function proxyArgs(env) {
     const value = env[name];
     if (value && !(name.toUpperCase() !== "NO_PROXY" && /\/\/(localhost|127\.|\[::1\])/.test(value))) args.push("-e", name);
   }
-  const ca = [env.SSL_CERT_FILE, env.NODE_EXTRA_CA_CERTS].find((f) => f && fs2.existsSync(f));
+  const ca = [env.SSL_CERT_FILE, env.NODE_EXTRA_CA_CERTS].find((f) => f && fs4.existsSync(f));
   if (ca) args.push("-v", `${ca}:/etc/ssl/certs/ca-certificates.crt:ro`);
   return args;
 }
@@ -373,10 +532,10 @@ var Trivy = class _Trivy {
     this.runArgs = runArgs;
   }
   static async prepare(exec2, opts) {
-    const workDir = fs2.mkdtempSync(path3.join(opts.tempDir, "container-scan-"));
-    const cacheDir = path3.join(opts.tempDir, "trivy-cache");
-    fs2.mkdirSync(cacheDir, { recursive: true });
-    await exec2("docker", ["save", "--output", path3.join(workDir, "image.tar"), opts.imageRef], { silent: true });
+    const workDir = fs4.mkdtempSync(path4.join(opts.tempDir, "container-scan-"));
+    const cacheDir = path4.join(opts.tempDir, "trivy-cache");
+    fs4.mkdirSync(cacheDir, { recursive: true });
+    await exec2("docker", ["save", "--output", path4.join(workDir, "image.tar"), opts.imageRef], { silent: true });
     const run2 = ["run", "--rm", "-v", `${workDir}:/scan`, "-v", `${cacheDir}:/cache`];
     if (typeof process.getuid === "function" && process.getuid() !== 0) {
       run2.push("--user", `${process.getuid()}:${process.getgid?.() ?? 0}`, "-e", "HOME=/tmp");
@@ -406,7 +565,7 @@ var Trivy = class _Trivy {
       "--no-progress",
       "--quiet"
     ]);
-    return path3.join(this.workDir, name);
+    return path4.join(this.workDir, name);
   }
   async scan(opts) {
     const args = [
@@ -431,13 +590,13 @@ var Trivy = class _Trivy {
     if (opts.ignoreFile) args.push("--ignorefile", "/scan-config/.trivyignore");
     await this.trivy(args);
     await this.trivy(["convert", "--format", "table", "/scan/trivy-report.json"], { ignoreReturnCode: true });
-    const reportFile = path3.join(this.workDir, "trivy-report.json");
-    const vulnerabilities = parseTrivyReport(fs2.readFileSync(reportFile, "utf8"));
+    const reportFile = path4.join(this.workDir, "trivy-report.json");
+    const vulnerabilities = parseTrivyReport(fs4.readFileSync(reportFile, "utf8"));
     return { vulnerabilities, counts: countBySeverity(vulnerabilities), reportFile };
   }
   /** Removes the (large) image tarball, keeps reports. */
   cleanup() {
-    fs2.rmSync(path3.join(this.workDir, "image.tar"), { force: true });
+    fs4.rmSync(path4.join(this.workDir, "image.tar"), { force: true });
   }
 };
 function summaryMarkdown(result, severity, limit = 50) {
@@ -507,18 +666,18 @@ async function prepareBuild(platform2, exec2, inputs) {
     platform2.warning(`safe-chain is only supported on Linux x64/arm64 agents; building without it.`);
     return { ...plain, safeChain: "unsupported agent" };
   }
-  const result = instrumentDockerfile(fs3.readFileSync(inputs.dockerfile, "utf8"));
+  const result = instrumentDockerfile(fs5.readFileSync(inputs.dockerfile, "utf8"));
   if (result.wrapped === 0) {
     platform2.info(`safe-chain: no RUN instructions to protect${result.reason ? ` (${result.reason})` : ""}.`);
     return { ...plain, safeChain: "nothing to protect" };
   }
   const ctx = platform2.context;
   const safeChainDir = await prepareSafeChain(exec2, ctx.toolCacheDir ?? ctx.tempDir);
-  const dir = fs3.mkdtempSync(path4.join(ctx.tempDir, "container-build-"));
-  const dockerfile = path4.join(dir, path4.basename(inputs.dockerfile));
-  fs3.writeFileSync(dockerfile, result.content);
+  const dir = fs5.mkdtempSync(path5.join(ctx.tempDir, "container-build-"));
+  const dockerfile = path5.join(dir, path5.basename(inputs.dockerfile));
+  fs5.writeFileSync(dockerfile, result.content);
   const ignore = `${inputs.dockerfile}.dockerignore`;
-  if (fs3.existsSync(ignore)) fs3.copyFileSync(ignore, `${dockerfile}.dockerignore`);
+  if (fs5.existsSync(ignore)) fs5.copyFileSync(ignore, `${dockerfile}.dockerignore`);
   const skipped = result.skipped ? ` (${result.skipped} exec-form/heredoc/custom-shell RUN left as is)` : "";
   platform2.info(`safe-chain: protecting package installs in ${result.wrapped} RUN instruction(s)${skipped}.`);
   return { dockerfile, buildContexts: { [SAFE_CHAIN_CONTEXT]: safeChainDir }, safeChain: `${result.wrapped} RUN instruction(s)` };
@@ -529,7 +688,7 @@ async function run(platform2, exec2 = exec) {
   const docker = new Docker(exec2);
   const tags = resolveTags(inputs.tags, ctx);
   const imageRefs = tags.map((t) => `${inputs.repository}:${t}`);
-  if (!fs3.existsSync(inputs.dockerfile)) throw new Error(`Dockerfile not found: ${inputs.dockerfile}`);
+  if (!fs5.existsSync(inputs.dockerfile)) throw new Error(`Dockerfile not found: ${inputs.dockerfile}`);
   platform2.info(`Image:      ${inputs.repository}`);
   platform2.info(`Tags:       ${tags.join(", ")}`);
   platform2.info(`Context:    ${inputs.context}`);
@@ -559,8 +718,8 @@ async function run(platform2, exec2 = exec) {
   );
   if (inputs.safeChain) summary.push(`\u{1F6E1}\uFE0F Package installs protected by [Aikido Safe Chain](https://github.com/AikidoSec/safe-chain): ${build.safeChain}`, "");
   if (inputs.sbom || inputs.scan) {
-    const ignoreFile = [path4.join(inputs.context, ".trivyignore"), path4.join(ctx.workspace, ".trivyignore")].find(
-      (f) => fs3.existsSync(f)
+    const ignoreFile = [path5.join(inputs.context, ".trivyignore"), path5.join(ctx.workspace, ".trivyignore")].find(
+      (f) => fs5.existsSync(f)
     );
     const trivy = await Trivy.prepare(exec2, {
       imageRef: imageRefs[0],
@@ -603,13 +762,18 @@ async function run(platform2, exec2 = exec) {
     }
   }
   if (inputs.push) {
-    const creds = resolveCredentials(platform2, inputs.registry);
+    const creds = await resolveCredentials(platform2, inputs.registry, { exec: exec2, hasExistingLogin: hasDockerLogin });
     if (creds) {
       platform2.setSecret(creds.password);
-      platform2.info(`Logging in to ${creds.registry} as ${creds.username}`);
+      platform2.info(`Logging in to ${creds.registry}${creds.source ? ` with ${creds.source}` : ` as ${creds.username}`}`);
       await docker.login(creds);
     } else {
       platform2.info(`No credentials configured for ${inputs.registry}; using existing docker login.`);
+      if (isAcr(inputs.registry)) {
+        platform2.info(
+          "No Azure identity found either (service connection, GitHub OIDC, AKS workload identity or managed identity of the agent)."
+        );
+      }
     }
     try {
       await group(platform2, "Push image", async () => {
@@ -637,15 +801,16 @@ async function run(platform2, exec2 = exec) {
 }
 
 // src/github/platform.ts
-var fs4 = __toESM(require("node:fs"));
-var os = __toESM(require("node:os"));
+var fs6 = __toESM(require("node:fs"));
+var os2 = __toESM(require("node:os"));
 var kebab = (name) => name.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`);
 function escapeData(s) {
   return s.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
 }
 var GitHubPlatform = class {
-  constructor(env = process.env) {
+  constructor(env = process.env, exec2 = exec) {
     this.env = env;
+    this.exec = exec2;
     const [owner, repo] = (env.GITHUB_REPOSITORY ?? "").split("/");
     this.context = {
       project: owner || void 0,
@@ -653,7 +818,7 @@ var GitHubPlatform = class {
       sha: env.GITHUB_SHA,
       ref: env.GITHUB_REF,
       isPullRequest: ["pull_request", "pull_request_target"].includes(env.GITHUB_EVENT_NAME ?? ""),
-      tempDir: env.RUNNER_TEMP || os.tmpdir(),
+      tempDir: env.RUNNER_TEMP || os2.tmpdir(),
       workspace: env.GITHUB_WORKSPACE || process.cwd(),
       toolCacheDir: env.RUNNER_TOOL_CACHE || void 0
     };
@@ -677,34 +842,67 @@ var GitHubPlatform = class {
     const password = this.getInput("password");
     if (!password) return void 0;
     if (!username) throw new Error("Input 'username' is required when 'password' is set");
-    return { registry, username, password };
+    return { registry, username, password, source: "username/password inputs" };
+  }
+  /**
+   * GitHub OIDC federated with a Microsoft Entra app registration or user-assigned managed identity.
+   * Needs `permissions: id-token: write` and the client/tenant id (inputs or AZURE_CLIENT_ID/AZURE_TENANT_ID).
+   */
+  getAzureIdentity() {
+    const explicitClientId = this.getInput("azureClientId");
+    const clientId = explicitClientId ?? this.getVariable("AZURE_CLIENT_ID");
+    const tenantId = this.getInput("azureTenantId") ?? this.getVariable("AZURE_TENANT_ID");
+    const requestUrl = this.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+    const requestToken = this.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
+    if (!clientId || !tenantId) return void 0;
+    if (!explicitClientId && this.env.AZURE_FEDERATED_TOKEN_FILE) return void 0;
+    if (!requestUrl || !requestToken) {
+      this.info("No GitHub OIDC token available (add 'permissions: id-token: write' to use it for Azure).");
+      return void 0;
+    }
+    return {
+      kind: "federated",
+      source: "GitHub OIDC",
+      clientId,
+      tenantId,
+      authorityHost: this.getVariable("AZURE_AUTHORITY_HOST"),
+      getAssertion: async () => {
+        const sep = requestUrl.includes("?") ? "&" : "?";
+        const r = await httpRequest(this.exec, {
+          url: `${requestUrl}${sep}audience=${encodeURIComponent("api://AzureADTokenExchange")}`,
+          headers: { Authorization: `Bearer ${requestToken}` }
+        });
+        if (!r.value) throw new Error("GitHub did not return an OIDC token");
+        return r.value;
+      }
+    };
   }
   /** Zero-config GitHub Container Registry: use the workflow token. */
   getFallbackCredentials(registry) {
     const token = this.getInput("githubToken");
     if (registry !== "ghcr.io" || !token) return void 0;
-    return { registry, username: this.getInput("username") ?? this.env.GITHUB_ACTOR ?? "github-actions", password: token };
+    return { registry, username: this.getInput("username") ?? this.env.GITHUB_ACTOR ?? "github-actions", password: token, source: "GITHUB_TOKEN" };
   }
   debug(message) {
-    process.stdout.write(`::debug::${escapeData(message)}${os.EOL}`);
+    process.stdout.write(`::debug::${escapeData(message)}${os2.EOL}`);
   }
   info(message) {
-    process.stdout.write(`${message}${os.EOL}`);
+    process.stdout.write(`${message}${os2.EOL}`);
   }
   warning(message) {
-    process.stdout.write(`::warning::${escapeData(message)}${os.EOL}`);
+    process.stdout.write(`::warning::${escapeData(message)}${os2.EOL}`);
   }
   error(message) {
-    process.stdout.write(`::error::${escapeData(message)}${os.EOL}`);
+    process.stdout.write(`::error::${escapeData(message)}${os2.EOL}`);
   }
   startGroup(name) {
-    process.stdout.write(`::group::${escapeData(name)}${os.EOL}`);
+    process.stdout.write(`::group::${escapeData(name)}${os2.EOL}`);
   }
   endGroup() {
-    process.stdout.write(`::endgroup::${os.EOL}`);
+    process.stdout.write(`::endgroup::${os2.EOL}`);
   }
   setSecret(value) {
-    for (const line of value.split(/\r?\n/)) if (line) process.stdout.write(`::add-mask::${escapeData(line)}${os.EOL}`);
+    for (const line of value.split(/\r?\n/)) if (line) process.stdout.write(`::add-mask::${escapeData(line)}${os2.EOL}`);
   }
   setOutput(name, value) {
     const file = this.env.GITHUB_OUTPUT;
@@ -714,11 +912,11 @@ var GitHubPlatform = class {
       return;
     }
     const delimiter = `ghadelimiter_${Math.random().toString(36).slice(2)}`;
-    fs4.appendFileSync(file, `${key}<<${delimiter}${os.EOL}${value}${os.EOL}${delimiter}${os.EOL}`);
+    fs6.appendFileSync(file, `${key}<<${delimiter}${os2.EOL}${value}${os2.EOL}${delimiter}${os2.EOL}`);
   }
   addSummary(markdown) {
     const file = this.env.GITHUB_STEP_SUMMARY;
-    if (file) fs4.appendFileSync(file, `${markdown}${os.EOL}`);
+    if (file) fs6.appendFileSync(file, `${markdown}${os2.EOL}`);
   }
   publishArtifact() {
   }
