@@ -20,7 +20,7 @@ permissions:
 
 steps:
   - uses: actions/checkout@v4
-  - uses: onek8s/container-build-extension@v1
+  - uses: onek8s/container-build-extension@v0
     with:
       image: ghcr.io/${{ github.repository }}
 ```
@@ -28,7 +28,7 @@ steps:
 Any other registry:
 
 ```yaml
-  - uses: onek8s/container-build-extension@v1
+  - uses: onek8s/container-build-extension@v0
     with:
       image: myacr.azurecr.io/my-app
       username: ${{ secrets.REGISTRY_USERNAME }}
@@ -43,7 +43,7 @@ Install the extension, then:
 
 ```yaml
 steps:
-  - task: ContainerBuild@1
+  - task: ContainerBuild@0
     inputs:
       image: myacr.azurecr.io/my-app
       containerRegistry: my-acr-connection

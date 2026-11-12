@@ -2,7 +2,7 @@
   "manifestVersion": 1,
   "id": "container-build",
   "name": "Container Build",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "publisher": "onek8s",
   "description": "Build a container image, scan it with Trivy and push it to a registry - with minimal configuration.",
   "public": false,
