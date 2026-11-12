@@ -21,6 +21,10 @@ export class FakePlatform implements Platform {
   variables: Record<string, string> = {};
   getFallbackCredentials?: (registry: string) => RegistryCredentials | undefined;
   getAzureIdentity?: (registry: string) => AzureIdentity | undefined;
+  fallbackRegistry?: string;
+  getFallbackRegistry() {
+    return this.fallbackRegistry;
+  }
   defaultRegistry?: string;
   getVariable(name: string) {
     return this.variables[name];

@@ -156,3 +156,65 @@ describe('hasDockerLogin', async () => {
     expect(hasDockerLogin('x.io', { DOCKER_CONFIG: path.join(dir, 'missing') })).toBe(false);
   });
 });
+
+describe('VM tags', async () => {
+  const { machineSettings, resetMachineSettings } = await import('../src/core/azure');
+  const { needsMachineSettings, resolveImage } = await import('../src/core/registry');
+  const ctx = { isPullRequest: false, tempDir: '/tmp', workspace: '/w', project: 'Shop', repository: 'Web' };
+
+  it('reads registry and client id from the instance metadata tags', async () => {
+    resetMachineSettings();
+    const calls: Array<{ url: string; config: string }> = [];
+    const exec = fakeCurl(
+      {
+        '/metadata/instance/compute': {
+          tagsList: [
+            { name: 'Container_Registry', value: ' myacr.azurecr.io ' },
+            { name: 'container-registry-client-id', value: 'uami' },
+            { name: 'env', value: 'prod' },
+          ],
+        },
+      },
+      calls,
+    );
+    expect(await machineSettings(exec)).toEqual({ registry: 'myacr.azurecr.io', clientId: 'uami' });
+    expect(calls[0].config).toContain('header = "Metadata: true"');
+    // cached
+    await machineSettings(exec);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('returns nothing outside of Azure', async () => {
+    resetMachineSettings();
+    expect(await machineSettings(fakeCurl({}))).toEqual({});
+  });
+
+  it('uses the tag after pipeline settings and before the GitHub fallback', () => {
+    const p = new FakePlatform({}, ctx);
+    p.fallbackRegistry = 'ghcr.io';
+    expect(needsMachineSettings(p)).toBe(true);
+    expect(resolveImage(p, { registry: 'myacr.azurecr.io' })).toBe('myacr.azurecr.io/shop/web');
+    expect(resolveImage(p, {})).toBe('ghcr.io/shop/web');
+    p.variables = { CONTAINER_REGISTRY: 'other.azurecr.io' };
+    expect(needsMachineSettings(p)).toBe(false);
+    expect(resolveImage(p, { registry: 'myacr.azurecr.io' })).toBe('other.azurecr.io/shop/web');
+    expect(needsMachineSettings(new FakePlatform({ image: 'x.io/a' }, ctx))).toBe(false);
+  });
+
+  it('selects the managed identity from the client id tag', async () => {
+    resetMachineSettings();
+    const calls: Array<{ url: string; config: string }> = [];
+    const exec = fakeCurl(
+      {
+        imds: true,
+        '/metadata/instance/compute': { tagsList: [{ name: 'container-registry-client-id', value: 'tagged-uami' }] },
+        '169.254.169.254/metadata/identity': { access_token: entraToken },
+        '/oauth2/exchange': { refresh_token: 'r' },
+      },
+      calls,
+    );
+    await resolveCredentials(new FakePlatform({}, ctx), 'myacr.azurecr.io', { exec, env: {} });
+    expect(calls.find((c) => c.url.includes('/metadata/identity'))?.url).toContain('client_id=tagged-uami');
+    resetMachineSettings();
+  });
+});

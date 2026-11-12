@@ -44,7 +44,11 @@ export class GitHubPlatform implements Platform {
     return value ? value : undefined;
   }
 
-  getDefaultRegistry(): string {
+  getDefaultRegistry(): undefined {
+    return undefined;
+  }
+
+  getFallbackRegistry(): string {
     return 'ghcr.io';
   }
 

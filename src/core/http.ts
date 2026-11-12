@@ -31,7 +31,9 @@ export async function httpRequest<T = unknown>(exec: Exec, req: HttpRequest): Pr
   } else if (req.json !== undefined) {
     lines.push(`header = "Content-Type: application/json"`, `data = ${quote(JSON.stringify(req.json))}`);
   }
-  const args = ['-sS', '--fail-with-body', '--retry', '2', '--max-time', String(req.timeoutSeconds ?? 30), '--config', '-'];
+  const timeout = req.timeoutSeconds ?? 30;
+  const args = ['-sS', '--fail-with-body', '--max-time', String(timeout), '--config', '-'];
+  if (timeout > 5) args.unshift('--retry', '2');
   if (req.noProxy) args.unshift('--noproxy', '*');
   const host = new URL(req.url).host;
   const r = await exec('curl', args, { input: lines.join('\n') + '\n', silent: true, ignoreReturnCode: true });

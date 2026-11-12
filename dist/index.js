@@ -40,7 +40,9 @@ async function httpRequest(exec2, req) {
   } else if (req.json !== void 0) {
     lines.push(`header = "Content-Type: application/json"`, `data = ${quote(JSON.stringify(req.json))}`);
   }
-  const args = ["-sS", "--fail-with-body", "--retry", "2", "--max-time", String(req.timeoutSeconds ?? 30), "--config", "-"];
+  const timeout = req.timeoutSeconds ?? 30;
+  const args = ["-sS", "--fail-with-body", "--max-time", String(timeout), "--config", "-"];
+  if (timeout > 5) args.unshift("--retry", "2");
   if (req.noProxy) args.unshift("--noproxy", "*");
   const host = new URL(req.url).host;
   const r = await exec2("curl", args, { input: lines.join("\n") + "\n", silent: true, ignoreReturnCode: true });
@@ -158,6 +160,26 @@ async function hasManagedIdentity(exec2) {
     { silent: true, ignoreReturnCode: true }
   );
   return r.stdout.trim() === "200";
+}
+var TAG_REGISTRY = "container-registry";
+var TAG_CLIENT_ID = "container-registry-client-id";
+var machineSettingsPromise;
+function machineSettings(exec2) {
+  machineSettingsPromise ??= (async () => {
+    try {
+      const r = await httpRequest(exec2, {
+        url: "http://169.254.169.254/metadata/instance/compute?api-version=2021-02-01",
+        headers: { Metadata: "true" },
+        noProxy: true,
+        timeoutSeconds: 2
+      });
+      const tags = new Map((r.tagsList ?? []).map((t) => [t.name.toLowerCase().replace(/_/g, "-"), t.value.trim()]));
+      return { registry: tags.get(TAG_REGISTRY) || void 0, clientId: tags.get(TAG_CLIENT_ID) || void 0 };
+    } catch {
+      return {};
+    }
+  })();
+  return machineSettingsPromise;
 }
 
 // src/core/docker.ts
@@ -284,19 +306,28 @@ function defaultImagePath(ctx, registry) {
   const project = ctx.project ? sanitizeComponent(ctx.project) : "";
   return project ? `${project}/${repo}` : repo;
 }
-function resolveRegistry(platform2) {
-  const value = platform2.getInput("registry") ?? platform2.getVariable(VAR_REGISTRY) ?? platform2.getDefaultRegistry();
+function configuredRegistry(platform2) {
+  return platform2.getInput("registry") ?? platform2.getVariable(VAR_REGISTRY) ?? platform2.getDefaultRegistry();
+}
+function needsMachineSettings(platform2) {
+  const image = platform2.getInput("image");
+  return !configuredRegistry(platform2) && !(image && hasRegistryHost(image));
+}
+function resolveRegistry(platform2, machine = {}) {
+  const value = configuredRegistry(platform2) ?? machine.registry ?? platform2.getFallbackRegistry?.();
   return value ? normalizeRegistry(value) : void 0;
 }
-function resolveImage(platform2) {
+function resolveImage(platform2, machine = {}) {
   const image = platform2.getInput("image");
-  const registry = resolveRegistry(platform2);
+  const registry = resolveRegistry(platform2, machine);
   if (image) {
     if (hasRegistryHost(image) || !registry) return image;
     return `${registry}/${image.replace(/^\/+/, "")}`;
   }
   if (!registry) {
-    throw new Error(`Input 'image' is required when no registry is configured (input 'registry' or variable ${VAR_REGISTRY}).`);
+    throw new Error(
+      `Input 'image' is required when no registry is configured (input 'registry', variable ${VAR_REGISTRY} or tag '${TAG_REGISTRY}' of the agent VM).`
+    );
   }
   const path6 = defaultImagePath(platform2.context, registry);
   if (!path6) throw new Error("Cannot derive the image name from the repository; set input 'image'.");
@@ -323,7 +354,7 @@ async function resolveCredentials(platform2, registry, opts) {
     const workload = workloadIdentityFromEnv(opts.env ?? process.env);
     if (workload) return acrCredentials(opts.exec, registry, workload, mask);
     if (await hasManagedIdentity(opts.exec)) {
-      const clientId = platform2.getInput("azureClientId") ?? (opts.env ?? process.env).AZURE_CLIENT_ID;
+      const clientId = platform2.getInput("azureClientId") ?? (opts.env ?? process.env).AZURE_CLIENT_ID ?? (await machineSettings(opts.exec)).clientId;
       return acrCredentials(opts.exec, registry, { kind: "managed", source: "managed identity", clientId }, mask);
     }
   }
@@ -363,9 +394,9 @@ function parseImage(image) {
   const hasRegistry = ref.includes("/") && (first.includes(".") || first.includes(":") || first === "localhost");
   return { registry: hasRegistry ? first : "docker.io", repository: ref };
 }
-function readInputs(platform2) {
+function readInputs(platform2, machine) {
   const { context: ctx } = platform2;
-  const image = resolveImage(platform2);
+  const image = resolveImage(platform2, machine);
   const { registry, repository } = parseImage(image);
   const context = path2.resolve(ctx.workspace, platform2.getInput("context") ?? ".");
   const dockerfileInput = platform2.getInput("dockerfile");
@@ -683,7 +714,9 @@ async function prepareBuild(platform2, exec2, inputs) {
   return { dockerfile, buildContexts: { [SAFE_CHAIN_CONTEXT]: safeChainDir }, safeChain: `${result.wrapped} RUN instruction(s)` };
 }
 async function run(platform2, exec2 = exec) {
-  const inputs = readInputs(platform2);
+  const machine = needsMachineSettings(platform2) ? await machineSettings(exec2) : void 0;
+  if (machine?.registry) platform2.info(`Registry ${machine.registry} from the '${TAG_REGISTRY}' tag of the agent VM.`);
+  const inputs = readInputs(platform2, machine);
   const ctx = platform2.context;
   const docker = new Docker(exec2);
   const tags = resolveTags(inputs.tags, ctx);
@@ -835,6 +868,9 @@ var GitHubPlatform = class {
     return value ? value : void 0;
   }
   getDefaultRegistry() {
+    return void 0;
+  }
+  getFallbackRegistry() {
     return "ghcr.io";
   }
   getCredentials(registry) {
