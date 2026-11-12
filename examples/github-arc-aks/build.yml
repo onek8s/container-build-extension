@@ -1,0 +1,12 @@
+# .github/workflows/build.yml in any repository of the organization
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: container-build      # ARC runner scale set from values.yaml
+    steps:
+      - uses: actions/checkout@v4
+      - uses: onek8s/container-build-extension@v0

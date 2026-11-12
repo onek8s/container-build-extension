@@ -1,0 +1,39 @@
+# Helm values for the gha-runner-scale-set chart (Actions Runner Controller):
+# autoscaling GitHub runners on AKS that build with Docker-in-Docker and push to
+# Azure Container Registry with AKS workload identity. See README.md / setup.sh.
+
+# Organization (or repository / enterprise) the runners register with.
+githubConfigUrl: https://github.com/my-org
+# Secret with a GitHub App (recommended) or PAT, created by setup.sh
+githubConfigSecret: arc-github-app
+
+# Controller installed by setup.sh (release "arc" in namespace "arc-systems")
+controllerServiceAccount:
+  namespace: arc-systems
+  name: arc-gha-rs-controller
+
+minRunners: 0
+maxRunners: 10
+
+# Workflows use: runs-on: container-build
+runnerScaleSetName: container-build
+
+# Docker-in-Docker sidecar: the container build extension needs a Docker daemon.
+containerMode:
+  type: dind
+
+template:
+  metadata:
+    labels:
+      # inject the workload identity token (AZURE_FEDERATED_TOKEN_FILE, AZURE_CLIENT_ID, ...)
+      azure.workload.identity/use: "true"
+  spec:
+    serviceAccountName: container-build-runner
+    containers:
+      - name: runner
+        image: ghcr.io/actions/actions-runner:latest
+        command: ["/home/runner/run.sh"]
+        env:
+          # configured once here, so workflows need no registry settings at all
+          - name: CONTAINER_REGISTRY
+            value: myacr.azurecr.io

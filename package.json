@@ -1,6 +1,6 @@
 {
   "name": "container-build-extension",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Build, scan and push container images. One code base for a GitHub Action and an Azure DevOps extension.",
   "license": "MIT",

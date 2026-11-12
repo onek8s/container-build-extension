@@ -31,6 +31,26 @@ jobs:
           name: vsix
           path: dist-azure/*.vsix
 
+  examples:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Bicep (Managed DevOps Pool)
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/bicep" https://github.com/Azure/bicep/releases/latest/download/bicep-linux-x64
+          chmod +x "$RUNNER_TEMP/bicep"
+          # warnings (unknown properties etc.) fail the build
+          out=$("$RUNNER_TEMP/bicep" build examples/azure-devops-managed-pool/main.bicep --stdout 2>&1 >/dev/null)
+          echo "$out"
+          [ -z "$out" ]
+      - name: Helm (Actions Runner Controller)
+        run: |
+          bash -n examples/github-arc-aks/setup.sh
+          helm template container-build oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set \
+            -n arc-runners -f examples/github-arc-aks/values.yaml > "$RUNNER_TEMP/arc.yaml"
+          grep -q 'azure.workload.identity/use: "true"' "$RUNNER_TEMP/arc.yaml"
+          grep -q 'serviceAccountName: container-build-runner' "$RUNNER_TEMP/arc.yaml"
+
   e2e-github:
     needs: check
     runs-on: ubuntu-latest
