@@ -4,7 +4,7 @@ Build a container image, scan it for vulnerabilities with [Trivy](https://trivy.
 
 ```yaml
 steps:
-  - task: ContainerBuild@1
+  - task: ContainerBuild@0
     inputs:
       image: myacr.azurecr.io/my-app
       containerRegistry: my-acr-connection   # Docker Registry service connection
