@@ -27,12 +27,14 @@ export class Docker {
     buildArgs: string[];
     target?: string;
     labels: Record<string, string>;
+    buildContexts?: Record<string, string>;
   }): Promise<void> {
     const args = ['build', '--file', opts.dockerfile];
     for (const ref of opts.imageRefs) args.push('--tag', ref);
     for (const arg of opts.buildArgs) args.push('--build-arg', arg);
     for (const [k, v] of Object.entries(opts.labels)) args.push('--label', `${k}=${v}`);
     if (opts.target) args.push('--target', opts.target);
+    for (const [name, dir] of Object.entries(opts.buildContexts ?? {})) args.push('--build-context', `${name}=${dir}`);
     args.push(opts.context);
     await this.exec('docker', args, { env: { ...process.env, DOCKER_BUILDKIT: '1' } });
   }

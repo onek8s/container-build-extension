@@ -41,6 +41,10 @@ export class FakePlatform implements Platform {
   addSummary(md: string) {
     this.summary += md;
   }
+  artifacts: Array<[string, string]> = [];
+  publishArtifact(n: string, f: string) {
+    this.artifacts.push([n, f]);
+  }
   setFailed(m: string) {
     this.failed = m;
   }

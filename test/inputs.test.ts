@@ -44,6 +44,9 @@ describe('readInputs', () => {
       severity: 'CRITICAL,HIGH',
       failOnVulnerabilities: true,
       ignoreUnfixed: true,
+      sbom: true,
+      sbomFormat: 'cyclonedx',
+      safeChain: true,
     });
     expect(i.trivyImage).toMatch(/^ghcr\.io\/aquasecurity\/trivy:\d/);
   });
@@ -58,6 +61,10 @@ describe('readInputs', () => {
   });
   it('validates severity', () => {
     expect(() => readInputs(new FakePlatform({ image: 'a.io/b', severity: 'HIGH,BAD' }, ctx))).toThrow(/severity/);
+  });
+  it('validates sbomFormat', () => {
+    expect(readInputs(new FakePlatform({ image: 'a.io/b', sbomFormat: 'SPDX-JSON' }, ctx)).sbomFormat).toBe('spdx-json');
+    expect(() => readInputs(new FakePlatform({ image: 'a.io/b', sbomFormat: 'xml' }, ctx))).toThrow(/sbomFormat/);
   });
   it('requires image', () => expect(() => readInputs(new FakePlatform({}, ctx))).toThrow(/image/));
 });

@@ -23,8 +23,8 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 ));
 
 // src/core/run.ts
-var fs2 = __toESM(require("node:fs"));
-var path3 = __toESM(require("node:path"));
+var fs3 = __toESM(require("node:fs"));
+var path4 = __toESM(require("node:path"));
 
 // src/core/docker.ts
 var Docker = class {
@@ -50,6 +50,7 @@ var Docker = class {
     for (const arg of opts.buildArgs) args.push("--build-arg", arg);
     for (const [k, v] of Object.entries(opts.labels)) args.push("--label", `${k}=${v}`);
     if (opts.target) args.push("--target", opts.target);
+    for (const [name, dir] of Object.entries(opts.buildContexts ?? {})) args.push("--build-context", `${name}=${dir}`);
     args.push(opts.context);
     await this.exec("docker", args, { env: { ...process.env, DOCKER_BUILDKIT: "1" } });
   }
@@ -156,6 +157,10 @@ function readInputs(platform2) {
   for (const s of severity.split(",")) {
     if (!SEVERITIES.includes(s)) throw new Error(`Invalid severity '${s}'. Allowed: ${SEVERITIES.join(",")}`);
   }
+  const sbomFormat = (platform2.getInput("sbomFormat") ?? "cyclonedx").toLowerCase();
+  if (sbomFormat !== "cyclonedx" && sbomFormat !== "spdx-json") {
+    throw new Error(`Invalid sbomFormat '${sbomFormat}'. Allowed: cyclonedx, spdx-json`);
+  }
   const trivyVersion = platform2.getInput("trivyVersion") ?? DEFAULT_TRIVY_VERSION;
   return {
     image,
@@ -171,13 +176,101 @@ function readInputs(platform2) {
     severity,
     failOnVulnerabilities: parseBool(platform2.getInput("failOnVulnerabilities"), true, "failOnVulnerabilities"),
     ignoreUnfixed: parseBool(platform2.getInput("ignoreUnfixed"), true, "ignoreUnfixed"),
+    sbom: parseBool(platform2.getInput("sbom"), true, "sbom"),
+    sbomFormat,
+    safeChain: parseBool(platform2.getInput("safeChain"), true, "safeChain"),
     trivyImage: trivyVersion.includes("/") ? trivyVersion : `ghcr.io/aquasecurity/trivy:${trivyVersion.replace(/^v/, "")}`
   };
 }
 
-// src/core/scan.ts
+// src/core/safechain.ts
+var import_node_crypto = require("node:crypto");
 var fs = __toESM(require("node:fs"));
 var path2 = __toESM(require("node:path"));
+var SAFE_CHAIN_VERSION = "1.5.29";
+var SHA256 = {
+  x64: "0a7287bbf5562610e1c4881b928037378c97b4ba7578694287b2ad3b7140b033",
+  arm64: "0d565a91e2b1bf0e8ed0ab44cb22fad2aafc05259fe7d92eb40cafc41501ab59"
+};
+var SAFE_CHAIN_CONTEXT = "container-build-safe-chain";
+var MOUNT_DIR = "/tmp/.container-build-safe-chain";
+var MOUNTS = [
+  // writable, not part of the image: safe-chain keeps its malware lists and certificates here
+  `--mount=type=cache,id=${SAFE_CHAIN_CONTEXT},target=${MOUNT_DIR},mode=0777`,
+  `--mount=type=bind,from=${SAFE_CHAIN_CONTEXT},source=bin,target=${MOUNT_DIR}/bin`,
+  `--mount=type=bind,from=${SAFE_CHAIN_CONTEXT},source=shims,target=${MOUNT_DIR}/shims`
+].join(" ");
+var PREFIX = `export PATH="${MOUNT_DIR}/shims:${MOUNT_DIR}/bin:$PATH";`;
+function instrumentDockerfile(content) {
+  const lines = content.split("\n");
+  for (const line of lines) {
+    const m = line.match(/^#\s*([a-z]+)\s*=\s*(.*)$/i);
+    if (!m) break;
+    if (m[1].toLowerCase() === "escape" && m[2].trim() !== "\\") {
+      return { content, wrapped: 0, skipped: 0, reason: "custom escape character (Windows Dockerfile)" };
+    }
+  }
+  let continuation = false;
+  let customShell = false;
+  let wrapped = 0;
+  let skipped = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    if (continuation) {
+      if (!trimmed.startsWith("#")) continuation = /\\\s*$/.test(line);
+      continue;
+    }
+    if (trimmed === "" || trimmed.startsWith("#")) continue;
+    continuation = /\\\s*$/.test(line);
+    const instr = trimmed.match(/^([a-z]+)\b/i)?.[1]?.toUpperCase();
+    if (instr === "FROM") customShell = false;
+    if (instr === "SHELL") customShell = true;
+    if (instr !== "RUN") continue;
+    const m = line.match(/^(\s*RUN)((?:\s+--\S+)*)(\s+)(.*)$/i);
+    const rest = m?.[4] ?? "";
+    if (!m || customShell || rest.startsWith("[") || /<<-?["']?[A-Za-z_]/.test(rest) || rest === "") {
+      skipped++;
+      continue;
+    }
+    lines[i] = `${m[1]}${m[2]} ${MOUNTS} ${PREFIX} ${rest}`;
+    wrapped++;
+  }
+  return { content: lines.join("\n"), wrapped, skipped };
+}
+function sha256(file) {
+  return (0, import_node_crypto.createHash)("sha256").update(fs.readFileSync(file)).digest("hex");
+}
+async function prepareSafeChain(exec2, cacheDir, arch = process.arch, expected = SHA256[arch]) {
+  if (!expected) throw new Error(`safe-chain is not available for architecture '${arch}'`);
+  const dir = path2.join(cacheDir, "container-build-safe-chain", SAFE_CHAIN_VERSION, arch);
+  const bin = path2.join(dir, "bin", "safe-chain");
+  if (!fs.existsSync(bin) || sha256(bin) !== expected) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.mkdirSync(path2.dirname(bin), { recursive: true });
+    const url = `https://github.com/AikidoSec/safe-chain/releases/download/${SAFE_CHAIN_VERSION}/safe-chain-linuxstatic-${arch}`;
+    const tmp = `${bin}.download`;
+    await exec2("curl", ["-fsSL", "--retry", "3", "-o", tmp, url], { silent: true });
+    const actual = sha256(tmp);
+    if (actual !== expected) {
+      fs.rmSync(tmp, { force: true });
+      throw new Error(`Checksum mismatch for ${url}: expected ${expected}, got ${actual}`);
+    }
+    fs.chmodSync(tmp, 493);
+    fs.renameSync(tmp, bin);
+  }
+  if (!fs.existsSync(path2.join(dir, "shims", "npm"))) {
+    const env = { ...process.env };
+    for (const k of ["GITHUB_PATH", "BASH_ENV", "TF_BUILD"]) delete env[k];
+    await exec2(bin, ["setup-ci"], { silent: true, env });
+  }
+  fs.rmSync(path2.join(dir, "certs"), { recursive: true, force: true });
+  return dir;
+}
+
+// src/core/scan.ts
+var fs2 = __toESM(require("node:fs"));
+var path3 = __toESM(require("node:path"));
 function parseTrivyReport(json) {
   const report = JSON.parse(json);
   const out = [];
@@ -207,18 +300,21 @@ function proxyArgs(env) {
     const value = env[name];
     if (value && !(name.toUpperCase() !== "NO_PROXY" && /\/\/(localhost|127\.|\[::1\])/.test(value))) args.push("-e", name);
   }
-  const ca = [env.SSL_CERT_FILE, env.NODE_EXTRA_CA_CERTS].find((f) => f && fs.existsSync(f));
+  const ca = [env.SSL_CERT_FILE, env.NODE_EXTRA_CA_CERTS].find((f) => f && fs2.existsSync(f));
   if (ca) args.push("-v", `${ca}:/etc/ssl/certs/ca-certificates.crt:ro`);
   return args;
 }
-async function scanImage(exec2, opts) {
-  const workDir = fs.mkdtempSync(path2.join(opts.tempDir, "container-scan-"));
-  const cacheDir = path2.join(opts.tempDir, "trivy-cache");
-  fs.mkdirSync(cacheDir, { recursive: true });
-  const tarFile = path2.join(workDir, "image.tar");
-  const reportFile = path2.join(workDir, "trivy-report.json");
-  try {
-    await exec2("docker", ["save", "--output", tarFile, opts.imageRef], { silent: true });
+var Trivy = class _Trivy {
+  constructor(exec2, workDir, runArgs) {
+    this.exec = exec2;
+    this.workDir = workDir;
+    this.runArgs = runArgs;
+  }
+  static async prepare(exec2, opts) {
+    const workDir = fs2.mkdtempSync(path3.join(opts.tempDir, "container-scan-"));
+    const cacheDir = path3.join(opts.tempDir, "trivy-cache");
+    fs2.mkdirSync(cacheDir, { recursive: true });
+    await exec2("docker", ["save", "--output", path3.join(workDir, "image.tar"), opts.imageRef], { silent: true });
     const run2 = ["run", "--rm", "-v", `${workDir}:/scan`, "-v", `${cacheDir}:/cache`];
     if (typeof process.getuid === "function" && process.getuid() !== 0) {
       run2.push("--user", `${process.getuid()}:${process.getgid?.() ?? 0}`, "-e", "HOME=/tmp");
@@ -226,7 +322,32 @@ async function scanImage(exec2, opts) {
     if (opts.ignoreFile) run2.push("-v", `${opts.ignoreFile}:/scan-config/.trivyignore:ro`);
     run2.push(...proxyArgs(process.env));
     run2.push(opts.trivyImage);
-    const trivyArgs = [
+    return new _Trivy(exec2, workDir, run2);
+  }
+  trivy(args, options = {}) {
+    return this.exec("docker", [...this.runArgs, ...args], options);
+  }
+  /** Generates an SBOM of the image and returns its path on the host. */
+  async sbom(format, repository) {
+    const base = repository.replace(/[^a-z0-9.-]+/g, "_");
+    const name = `${base}.${format === "cyclonedx" ? "cdx" : "spdx"}.json`;
+    await this.trivy([
+      "image",
+      "--input",
+      "/scan/image.tar",
+      "--cache-dir",
+      "/cache",
+      "--format",
+      format,
+      "--output",
+      `/scan/${name}`,
+      "--no-progress",
+      "--quiet"
+    ]);
+    return path3.join(this.workDir, name);
+  }
+  async scan(opts) {
+    const args = [
       "image",
       "--input",
       "/scan/image.tar",
@@ -244,18 +365,19 @@ async function scanImage(exec2, opts) {
       "0",
       "--no-progress"
     ];
-    if (opts.ignoreUnfixed) trivyArgs.push("--ignore-unfixed");
-    if (opts.ignoreFile) trivyArgs.push("--ignorefile", "/scan-config/.trivyignore");
-    await exec2("docker", [...run2, ...trivyArgs]);
-    await exec2("docker", [...run2, "convert", "--format", "table", "/scan/trivy-report.json"], {
-      ignoreReturnCode: true
-    });
-    const vulnerabilities = parseTrivyReport(fs.readFileSync(reportFile, "utf8"));
+    if (opts.ignoreUnfixed) args.push("--ignore-unfixed");
+    if (opts.ignoreFile) args.push("--ignorefile", "/scan-config/.trivyignore");
+    await this.trivy(args);
+    await this.trivy(["convert", "--format", "table", "/scan/trivy-report.json"], { ignoreReturnCode: true });
+    const reportFile = path3.join(this.workDir, "trivy-report.json");
+    const vulnerabilities = parseTrivyReport(fs2.readFileSync(reportFile, "utf8"));
     return { vulnerabilities, counts: countBySeverity(vulnerabilities), reportFile };
-  } finally {
-    fs.rmSync(tarFile, { force: true });
   }
-}
+  /** Removes the (large) image tarball, keeps reports. */
+  cleanup() {
+    fs2.rmSync(path3.join(this.workDir, "image.tar"), { force: true });
+  }
+};
 function summaryMarkdown(result, severity, limit = 50) {
   const order = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"];
   const lines = [];
@@ -316,17 +438,42 @@ async function group(platform2, name, fn) {
     platform2.endGroup();
   }
 }
+async function prepareBuild(platform2, exec2, inputs) {
+  const plain = { dockerfile: inputs.dockerfile, buildContexts: {}, safeChain: "disabled" };
+  if (!inputs.safeChain) return plain;
+  if (process.platform !== "linux" || !["x64", "arm64"].includes(process.arch)) {
+    platform2.warning(`safe-chain is only supported on Linux x64/arm64 agents; building without it.`);
+    return { ...plain, safeChain: "unsupported agent" };
+  }
+  const result = instrumentDockerfile(fs3.readFileSync(inputs.dockerfile, "utf8"));
+  if (result.wrapped === 0) {
+    platform2.info(`safe-chain: no RUN instructions to protect${result.reason ? ` (${result.reason})` : ""}.`);
+    return { ...plain, safeChain: "nothing to protect" };
+  }
+  const ctx = platform2.context;
+  const safeChainDir = await prepareSafeChain(exec2, ctx.toolCacheDir ?? ctx.tempDir);
+  const dir = fs3.mkdtempSync(path4.join(ctx.tempDir, "container-build-"));
+  const dockerfile = path4.join(dir, path4.basename(inputs.dockerfile));
+  fs3.writeFileSync(dockerfile, result.content);
+  const ignore = `${inputs.dockerfile}.dockerignore`;
+  if (fs3.existsSync(ignore)) fs3.copyFileSync(ignore, `${dockerfile}.dockerignore`);
+  const skipped = result.skipped ? ` (${result.skipped} exec-form/heredoc/custom-shell RUN left as is)` : "";
+  platform2.info(`safe-chain: protecting package installs in ${result.wrapped} RUN instruction(s)${skipped}.`);
+  return { dockerfile, buildContexts: { [SAFE_CHAIN_CONTEXT]: safeChainDir }, safeChain: `${result.wrapped} RUN instruction(s)` };
+}
 async function run(platform2, exec2 = exec) {
   const inputs = readInputs(platform2);
   const ctx = platform2.context;
   const docker = new Docker(exec2);
   const tags = resolveTags(inputs.tags, ctx);
   const imageRefs = tags.map((t) => `${inputs.repository}:${t}`);
-  if (!fs2.existsSync(inputs.dockerfile)) throw new Error(`Dockerfile not found: ${inputs.dockerfile}`);
+  if (!fs3.existsSync(inputs.dockerfile)) throw new Error(`Dockerfile not found: ${inputs.dockerfile}`);
   platform2.info(`Image:      ${inputs.repository}`);
   platform2.info(`Tags:       ${tags.join(", ")}`);
   platform2.info(`Context:    ${inputs.context}`);
   platform2.info(`Dockerfile: ${inputs.dockerfile}`);
+  platform2.info(`SafeChain:  ${inputs.safeChain ? "yes" : "no"}`);
+  platform2.info(`SBOM:       ${inputs.sbom ? inputs.sbomFormat : "no"}`);
   platform2.info(`Scan:       ${inputs.scan ? `yes (${inputs.severity})` : "no"}`);
   platform2.info(`Push:       ${inputs.push ? "yes" : "no"}`);
   platform2.info(`Docker:     ${await docker.version()}`);
@@ -334,47 +481,63 @@ async function run(platform2, exec2 = exec) {
   if (ctx.sha) labels["org.opencontainers.image.revision"] = ctx.sha;
   const result = { imageRefs, pushed: false };
   const summary = [`### Container build: \`${inputs.repository}\``, "", `Tags: ${tags.map((t) => `\`${t}\``).join(", ")}`, ""];
+  const build = await prepareBuild(platform2, exec2, inputs);
   await group(
     platform2,
     "Build image",
     () => docker.build({
       context: inputs.context,
-      dockerfile: inputs.dockerfile,
+      dockerfile: build.dockerfile,
       imageRefs,
       buildArgs: inputs.buildArgs,
       target: inputs.target,
-      labels
+      labels,
+      buildContexts: build.buildContexts
     })
   );
-  if (inputs.scan) {
-    const ignoreFile = [path3.join(inputs.context, ".trivyignore"), path3.join(ctx.workspace, ".trivyignore")].find(
-      (f) => fs2.existsSync(f)
+  if (inputs.safeChain) summary.push(`\u{1F6E1}\uFE0F Package installs protected by [Aikido Safe Chain](https://github.com/AikidoSec/safe-chain): ${build.safeChain}`, "");
+  if (inputs.sbom || inputs.scan) {
+    const ignoreFile = [path4.join(inputs.context, ".trivyignore"), path4.join(ctx.workspace, ".trivyignore")].find(
+      (f) => fs3.existsSync(f)
     );
-    const scan = await group(
-      platform2,
-      "Security scan (Trivy)",
-      () => scanImage(exec2, {
-        imageRef: imageRefs[0],
-        trivyImage: inputs.trivyImage,
-        severity: inputs.severity,
-        ignoreUnfixed: inputs.ignoreUnfixed,
-        tempDir: ctx.tempDir,
-        ignoreFile
-      })
-    );
-    result.scan = scan;
-    platform2.setOutput("scanReport", scan.reportFile);
-    platform2.setOutput("vulnerabilities", String(scan.vulnerabilities.length));
-    summary.push("#### Security scan", "", summaryMarkdown(scan, inputs.severity), "");
-    if (scan.vulnerabilities.length > 0) {
-      const msg = `Found ${scan.vulnerabilities.length} vulnerabilities with severity ${inputs.severity}`;
-      if (inputs.failOnVulnerabilities) {
-        platform2.addSummary(summary.join("\n"));
-        throw new Error(`${msg}. Image was not pushed. Fix them, add them to .trivyignore, or set failOnVulnerabilities to false.`);
+    const trivy = await Trivy.prepare(exec2, {
+      imageRef: imageRefs[0],
+      trivyImage: inputs.trivyImage,
+      tempDir: ctx.tempDir,
+      ignoreFile
+    });
+    try {
+      if (inputs.sbom) {
+        const sbom = await group(platform2, `Generate SBOM (${inputs.sbomFormat})`, () => trivy.sbom(inputs.sbomFormat, inputs.repository));
+        result.sbom = sbom;
+        platform2.setOutput("sbom", sbom);
+        platform2.publishArtifact("sbom", sbom);
+        platform2.info(`SBOM written to ${sbom}`);
+        summary.push(`\u{1F4E6} SBOM (${inputs.sbomFormat}) generated.`, "");
       }
-      platform2.warning(msg);
-    } else {
-      platform2.info("No vulnerabilities found.");
+      if (inputs.scan) {
+        const scan = await group(
+          platform2,
+          "Security scan (Trivy)",
+          () => trivy.scan({ severity: inputs.severity, ignoreUnfixed: inputs.ignoreUnfixed, ignoreFile })
+        );
+        result.scan = scan;
+        platform2.setOutput("scanReport", scan.reportFile);
+        platform2.setOutput("vulnerabilities", String(scan.vulnerabilities.length));
+        summary.push("#### Security scan", "", summaryMarkdown(scan, inputs.severity), "");
+        if (scan.vulnerabilities.length > 0) {
+          const msg = `Found ${scan.vulnerabilities.length} vulnerabilities with severity ${inputs.severity}`;
+          if (inputs.failOnVulnerabilities) {
+            platform2.addSummary(summary.join("\n"));
+            throw new Error(`${msg}. Image was not pushed. Fix them, add them to .trivyignore, or set failOnVulnerabilities to false.`);
+          }
+          platform2.warning(msg);
+        } else {
+          platform2.info("No vulnerabilities found.");
+        }
+      }
+    } finally {
+      trivy.cleanup();
     }
   }
   if (inputs.push) {
@@ -412,7 +575,7 @@ async function run(platform2, exec2 = exec) {
 }
 
 // src/github/platform.ts
-var fs3 = __toESM(require("node:fs"));
+var fs4 = __toESM(require("node:fs"));
 var os = __toESM(require("node:os"));
 var kebab = (name) => name.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`);
 function escapeData(s) {
@@ -426,7 +589,8 @@ var GitHubPlatform = class {
       ref: env.GITHUB_REF,
       isPullRequest: ["pull_request", "pull_request_target"].includes(env.GITHUB_EVENT_NAME ?? ""),
       tempDir: env.RUNNER_TEMP || os.tmpdir(),
-      workspace: env.GITHUB_WORKSPACE || process.cwd()
+      workspace: env.GITHUB_WORKSPACE || process.cwd(),
+      toolCacheDir: env.RUNNER_TOOL_CACHE || void 0
     };
   }
   name = "GitHub Actions";
@@ -478,11 +642,13 @@ var GitHubPlatform = class {
       return;
     }
     const delimiter = `ghadelimiter_${Math.random().toString(36).slice(2)}`;
-    fs3.appendFileSync(file, `${key}<<${delimiter}${os.EOL}${value}${os.EOL}${delimiter}${os.EOL}`);
+    fs4.appendFileSync(file, `${key}<<${delimiter}${os.EOL}${value}${os.EOL}${delimiter}${os.EOL}`);
   }
   addSummary(markdown) {
     const file = this.env.GITHUB_STEP_SUMMARY;
-    if (file) fs3.appendFileSync(file, `${markdown}${os.EOL}`);
+    if (file) fs4.appendFileSync(file, `${markdown}${os.EOL}`);
+  }
+  publishArtifact() {
   }
   setFailed(message) {
     this.error(message);

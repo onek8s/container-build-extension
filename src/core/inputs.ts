@@ -1,5 +1,6 @@
 import * as path from 'node:path';
 import type { Platform } from './platform';
+import type { SbomFormat } from './scan';
 
 export type PushMode = 'auto' | 'true' | 'false';
 
@@ -18,6 +19,9 @@ export interface Inputs {
   failOnVulnerabilities: boolean;
   ignoreUnfixed: boolean;
   trivyImage: string;
+  sbom: boolean;
+  sbomFormat: SbomFormat;
+  safeChain: boolean;
 }
 
 export const DEFAULT_TRIVY_VERSION = '0.76.2';
@@ -93,6 +97,11 @@ export function readInputs(platform: Platform): Inputs {
     if (!SEVERITIES.includes(s)) throw new Error(`Invalid severity '${s}'. Allowed: ${SEVERITIES.join(',')}`);
   }
 
+  const sbomFormat = (platform.getInput('sbomFormat') ?? 'cyclonedx').toLowerCase();
+  if (sbomFormat !== 'cyclonedx' && sbomFormat !== 'spdx-json') {
+    throw new Error(`Invalid sbomFormat '${sbomFormat}'. Allowed: cyclonedx, spdx-json`);
+  }
+
   const trivyVersion = platform.getInput('trivyVersion') ?? DEFAULT_TRIVY_VERSION;
 
   return {
@@ -109,6 +118,9 @@ export function readInputs(platform: Platform): Inputs {
     severity,
     failOnVulnerabilities: parseBool(platform.getInput('failOnVulnerabilities'), true, 'failOnVulnerabilities'),
     ignoreUnfixed: parseBool(platform.getInput('ignoreUnfixed'), true, 'ignoreUnfixed'),
+    sbom: parseBool(platform.getInput('sbom'), true, 'sbom'),
+    sbomFormat,
+    safeChain: parseBool(platform.getInput('safeChain'), true, 'safeChain'),
     trivyImage: trivyVersion.includes('/') ? trivyVersion : `ghcr.io/aquasecurity/trivy:${trivyVersion.replace(/^v/, '')}`,
   };
 }

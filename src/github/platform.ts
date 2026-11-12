@@ -20,6 +20,7 @@ export class GitHubPlatform implements Platform {
       isPullRequest: ['pull_request', 'pull_request_target'].includes(env.GITHUB_EVENT_NAME ?? ''),
       tempDir: env.RUNNER_TEMP || os.tmpdir(),
       workspace: env.GITHUB_WORKSPACE || process.cwd(),
+      toolCacheDir: env.RUNNER_TOOL_CACHE || undefined,
     };
   }
 
@@ -78,6 +79,10 @@ export class GitHubPlatform implements Platform {
   addSummary(markdown: string): void {
     const file = this.env.GITHUB_STEP_SUMMARY;
     if (file) fs.appendFileSync(file, `${markdown}${os.EOL}`);
+  }
+  publishArtifact(): void {
+    // JavaScript actions cannot upload artifacts without the artifact service SDK;
+    // the file path is exposed as an output instead (use actions/upload-artifact).
   }
   setFailed(message: string): void {
     this.error(message);

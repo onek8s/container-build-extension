@@ -1,0 +1,25 @@
+name: Setup
+description: Install Node.js and the npm dependencies, protected by Aikido Safe Chain.
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v5
+      with:
+        node-version: 24
+        cache: npm
+    - name: Install Aikido Safe Chain
+      shell: bash
+      env:
+        SAFE_CHAIN_VERSION_PIN: 1.5.29
+        SAFE_CHAIN_INSTALLER_SHA256: e9bfa05430bca0efcf26e5a0f06d09b9da8cc21de2e0ffab03f512dde649ebbe
+      run: |
+        set -euo pipefail
+        installer="$RUNNER_TEMP/install-safe-chain.sh"
+        curl -fsSL "https://github.com/AikidoSec/safe-chain/releases/download/${SAFE_CHAIN_VERSION_PIN}/install-safe-chain.sh" -o "$installer"
+        echo "${SAFE_CHAIN_INSTALLER_SHA256}  $installer" | sha256sum -c -
+        sh "$installer" --ci
+    - name: Install dependencies
+      shell: bash
+      run: |
+        npm safe-chain-verify
+        npm ci
