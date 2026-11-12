@@ -156,3 +156,52 @@ jobs:
           echo "$tags"
           echo "$tags" | grep -q '"v9.8.7"'
           echo "$tags" | grep -q '"9.8.7"'
+
+      - name: Run Azure task with variable group credentials and automatic image name
+        env:
+          CONTAINER_REGISTRY: localhost:5001
+          CONTAINER_REGISTRY_USERNAME: tester
+          # the agent passes secret variables to tasks as SECRET_<NAME>
+          SECRET_CONTAINER_REGISTRY_PASSWORD: s3cret
+          INPUT_CONTEXT: test/fixtures/app
+          INPUT_SCAN: "false"
+          SYSTEM_TEAMPROJECT: E2E Project
+          BUILD_REPOSITORY_NAME: Demo_Repo
+          BUILD_SOURCEVERSION: ${{ github.sha }}
+          BUILD_SOURCEBRANCH: refs/heads/main
+          BUILD_REASON: IndividualCI
+          BUILD_SOURCESDIRECTORY: ${{ github.workspace }}
+          AGENT_TEMPDIRECTORY: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          node azure/tasks/ContainerBuild/index.js | tee "$RUNNER_TEMP/azure-vars.log"
+          tags=$(curl -sf -u tester:s3cret localhost:5001/v2/e2e-project/demo_repo/tags/list)
+          echo "$tags"
+          echo "$tags" | grep -q '"latest"'
+          if grep -v 'task.setsecret' "$RUNNER_TEMP/azure-vars.log" | grep -q s3cret; then echo "::error::password leaked to the log"; exit 1; fi
+
+  e2e-reusable-workflow:
+    needs: check
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/container-build.yml
+    with:
+      context: test/fixtures/app
+      push: "false"
+      action-ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+  e2e-reusable-workflow-verify:
+    needs: e2e-reusable-workflow
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify automatic image name
+        env:
+          IMAGE: ${{ needs.e2e-reusable-workflow.outputs.image }}
+          TAGS: ${{ needs.e2e-reusable-workflow.outputs.tags }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          echo "image=$IMAGE tags=$TAGS"
+          [[ "$IMAGE" == */"${REPO,,}" ]]
+          [[ "$TAGS" == *"$IMAGE:"* ]]

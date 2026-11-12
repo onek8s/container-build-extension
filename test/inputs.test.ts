@@ -66,5 +66,5 @@ describe('readInputs', () => {
     expect(readInputs(new FakePlatform({ image: 'a.io/b', sbomFormat: 'SPDX-JSON' }, ctx)).sbomFormat).toBe('spdx-json');
     expect(() => readInputs(new FakePlatform({ image: 'a.io/b', sbomFormat: 'xml' }, ctx))).toThrow(/sbomFormat/);
   });
-  it('requires image', () => expect(() => readInputs(new FakePlatform({}, ctx))).toThrow(/image/));
+  it('requires image or registry', () => expect(() => readInputs(new FakePlatform({}, ctx))).toThrow(/image/));
 });

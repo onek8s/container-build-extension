@@ -17,6 +17,15 @@ export class FakePlatform implements Platform {
   getInput(name: string) {
     return this.inputs[name] || undefined;
   }
+  variables: Record<string, string> = {};
+  getFallbackCredentials?: (registry: string) => RegistryCredentials | undefined;
+  defaultRegistry?: string;
+  getVariable(name: string) {
+    return this.variables[name];
+  }
+  getDefaultRegistry() {
+    return this.defaultRegistry;
+  }
   getCredentials() {
     return this.creds;
   }

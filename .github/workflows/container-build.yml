@@ -1,0 +1,109 @@
+# Reusable workflow: configure the registry once as organization (or repository) variables and secrets
+#   variable CONTAINER_REGISTRY            e.g. myacr.azurecr.io (default: ghcr.io)
+#   variable CONTAINER_REGISTRY_USERNAME   (or secret with the same name)
+#   secret   CONTAINER_REGISTRY_PASSWORD
+# and call it from any repository with:
+#   jobs:
+#     build:
+#       uses: onek8s/container-build-extension/.github/workflows/container-build.yml@v0
+#       secrets: inherit
+name: Container build
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: "Image name. Default: <registry>/<owner>/<repository>."
+        type: string
+        required: false
+      context:
+        type: string
+        required: false
+        default: "."
+      dockerfile:
+        type: string
+        required: false
+      build-args:
+        type: string
+        required: false
+      target:
+        type: string
+        required: false
+      tags:
+        type: string
+        required: false
+      push:
+        type: string
+        required: false
+        default: "auto"
+      runs-on:
+        type: string
+        required: false
+        default: "ubuntu-latest"
+      action-ref:
+        description: "Version of the container build action to use."
+        type: string
+        required: false
+        default: "v0"
+    secrets:
+      CONTAINER_REGISTRY_USERNAME:
+        required: false
+      CONTAINER_REGISTRY_PASSWORD:
+        required: false
+    outputs:
+      image:
+        value: ${{ jobs.build.outputs.image }}
+      image-ref:
+        value: ${{ jobs.build.outputs.image-ref }}
+      digest:
+        value: ${{ jobs.build.outputs.digest }}
+      tags:
+        value: ${{ jobs.build.outputs.tags }}
+
+jobs:
+  build:
+    runs-on: ${{ inputs.runs-on }}
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.build.outputs.image }}
+      image-ref: ${{ steps.build.outputs.image-ref }}
+      digest: ${{ steps.build.outputs.digest }}
+      tags: ${{ steps.build.outputs.tags }}
+    steps:
+      # sources go to a sub directory so the action checkout is never part of the build context
+      - uses: actions/checkout@v5
+        with:
+          path: source
+      - name: Check out container build action
+        uses: actions/checkout@v5
+        with:
+          repository: onek8s/container-build-extension
+          ref: ${{ inputs.action-ref }}
+          path: .container-build-action
+          persist-credentials: false
+      - name: Use the repository's .trivyignore
+        run: if [ -f source/.trivyignore ]; then cp source/.trivyignore .trivyignore; fi
+      - name: Build, scan and push
+        id: build
+        uses: ./.container-build-action
+        env:
+          # credentials are only used for the registry named in CONTAINER_REGISTRY
+          CONTAINER_REGISTRY: ${{ vars.CONTAINER_REGISTRY }}
+          CONTAINER_REGISTRY_USERNAME: ${{ vars.CONTAINER_REGISTRY_USERNAME || secrets.CONTAINER_REGISTRY_USERNAME }}
+          CONTAINER_REGISTRY_PASSWORD: ${{ secrets.CONTAINER_REGISTRY_PASSWORD }}
+        with:
+          image: ${{ inputs.image }}
+          context: source/${{ inputs.context }}
+          dockerfile: ${{ inputs.dockerfile && format('source/{0}', inputs.dockerfile) || '' }}
+          build-args: ${{ inputs.build-args }}
+          target: ${{ inputs.target }}
+          tags: ${{ inputs.tags }}
+          push: ${{ inputs.push }}
+      - name: Upload SBOM
+        if: always() && steps.build.outputs.sbom != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: ${{ steps.build.outputs.sbom }}

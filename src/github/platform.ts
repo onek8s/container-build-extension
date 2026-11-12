@@ -14,7 +14,10 @@ export class GitHubPlatform implements Platform {
   readonly context: BuildContext;
 
   constructor(private readonly env: NodeJS.ProcessEnv = process.env) {
+    const [owner, repo] = (env.GITHUB_REPOSITORY ?? '').split('/');
     this.context = {
+      project: owner || undefined,
+      repository: repo || undefined,
       sha: env.GITHUB_SHA,
       ref: env.GITHUB_REF,
       isPullRequest: ['pull_request', 'pull_request_target'].includes(env.GITHUB_EVENT_NAME ?? ''),
@@ -30,19 +33,28 @@ export class GitHubPlatform implements Platform {
     return value ? value : undefined;
   }
 
+  getVariable(name: string): string | undefined {
+    const value = this.env[name]?.trim();
+    return value ? value : undefined;
+  }
+
+  getDefaultRegistry(): string {
+    return 'ghcr.io';
+  }
+
   getCredentials(registry: string): RegistryCredentials | undefined {
     const username = this.getInput('username');
     const password = this.getInput('password');
-    if (password) {
-      if (!username) throw new Error("Input 'username' is required when 'password' is set");
-      return { registry, username, password };
-    }
-    // Zero-config GitHub Container Registry: use the workflow token.
+    if (!password) return undefined;
+    if (!username) throw new Error("Input 'username' is required when 'password' is set");
+    return { registry, username, password };
+  }
+
+  /** Zero-config GitHub Container Registry: use the workflow token. */
+  getFallbackCredentials(registry: string): RegistryCredentials | undefined {
     const token = this.getInput('githubToken');
-    if (registry === 'ghcr.io' && token) {
-      return { registry, username: username ?? this.env.GITHUB_ACTOR ?? 'github-actions', password: token };
-    }
-    return undefined;
+    if (registry !== 'ghcr.io' || !token) return undefined;
+    return { registry, username: this.getInput('username') ?? this.env.GITHUB_ACTOR ?? 'github-actions', password: token };
   }
 
   debug(message: string): void {

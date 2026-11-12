@@ -19,6 +19,10 @@ export interface BuildContext {
   tempDir: string;
   /** Workspace / sources directory. */
   workspace: string;
+  /** Source project / owner (GitHub owner, Azure DevOps project) used for automatic image names. */
+  project?: string;
+  /** Source repository name used for automatic image names. */
+  repository?: string;
   /** Directory for downloaded tools that may be reused between jobs (defaults to tempDir). */
   toolCacheDir?: string;
 }
@@ -27,8 +31,14 @@ export interface Platform {
   readonly name: string;
   /** Returns the trimmed input value, or undefined when not set/empty. Names are camelCase. */
   getInput(name: string): string | undefined;
-  /** Platform-specific way of resolving registry credentials (service connection, token...). */
+  /** Pipeline/workflow variable or environment variable (incl. secret variables on Azure DevOps). */
+  getVariable(name: string): string | undefined;
+  /** Registry implied by the platform configuration (service connection, ghcr.io on GitHub). */
+  getDefaultRegistry(): string | undefined;
+  /** Explicitly configured credentials (inputs, service connection). */
   getCredentials(registry: string): RegistryCredentials | undefined;
+  /** Credentials used when nothing is configured (e.g. GITHUB_TOKEN for ghcr.io). */
+  getFallbackCredentials?(registry: string): RegistryCredentials | undefined;
   readonly context: BuildContext;
 
   debug(message: string): void;

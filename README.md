@@ -8,7 +8,8 @@ The same code runs as a **GitHub Action** and as an **Azure DevOps** extension.
 build (package installs protected by Aikido Safe Chain) → SBOM → vulnerability scan → push
 ```
 
-- **Minimal configuration**: the image name is the only required input.
+- **Zero configuration**: the image name is derived from the source (`<registry>/<owner|project>/<repository>`),
+  and the registry and its credentials can be configured once for the whole organization or project.
 - **Secure by default**: the image is scanned *before* it is pushed; vulnerable images never reach the registry.
 - **Malware protection during the build**: `npm`, `yarn`, `pnpm`, `bun`, `pip`, `uv`, `poetry`, ... in your Dockerfile's
   `RUN` instructions run through [Aikido Safe Chain](https://github.com/AikidoSec/safe-chain), without changing your Dockerfile.
@@ -17,9 +18,64 @@ build (package installs protected by Aikido Safe Chain) → SBOM → vulnerabili
 - **No push for pull requests** by default (`push: auto`).
 - **Zero runtime dependencies**: each platform gets a single bundled JavaScript file.
 
-## GitHub Actions
+## Image naming
 
-Push to GitHub Container Registry needs no credentials at all:
+When `image` is not set, the image name is derived from the source repository:
+
+| Platform | Image name |
+|---|---|
+| GitHub | `<registry>/<owner>/<repository>`, e.g. `ghcr.io/onek8s/container-build-extension` |
+| Azure DevOps | `<registry>/<project>/<repository>`, e.g. `myacr.azurecr.io/web-shop/frontend` |
+| Docker Hub | `docker.io/<namespace>/<repository>` (Docker Hub allows only one level) |
+
+Names are lower-cased and characters that are not allowed are replaced with `-`. `image` can also be a name below the
+registry (`image: tools/api` → `myacr.azurecr.io/tools/api`) or a full reference (`image: other.io/team/app`).
+
+The registry is the first of: the `registry` input, the `CONTAINER_REGISTRY` variable, the service connection's registry
+(Azure DevOps), or `ghcr.io` (GitHub). It may include a namespace, e.g. `myacr.azurecr.io/team`.
+
+## Configure the registry once
+
+Neither GitHub nor Azure DevOps can store secrets for an action or extension at install time. Instead, put the registry and
+its credentials in organization or project level settings under these names, and the extension picks them up:
+
+| Name | Kind | Example |
+|---|---|---|
+| `CONTAINER_REGISTRY` | variable | `myacr.azurecr.io` |
+| `CONTAINER_REGISTRY_USERNAME` | variable or secret | service principal / token name |
+| `CONTAINER_REGISTRY_PASSWORD` | secret | password / token |
+
+The credentials are only used for the registry named in `CONTAINER_REGISTRY`. If a pipeline pushes to another registry,
+they are not sent.
+
+### GitHub Actions
+
+Create the variables and secrets in *Organization settings → Secrets and variables → Actions* (or per repository).
+Then every repository needs only this workflow:
+
+```yaml
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+jobs:
+  build:
+    permissions:
+      contents: read
+      packages: write   # only needed for ghcr.io
+    uses: onek8s/container-build-extension/.github/workflows/container-build.yml@v0
+    secrets: inherit
+```
+
+The reusable workflow checks out the repository, builds, protects package installs, generates and uploads the SBOM, scans
+and pushes. Optional inputs: `image`, `context`, `dockerfile`, `build-args`, `target`, `tags`, `push`, `runs-on`. Outputs:
+`image`, `image-ref`, `digest`, `tags`.
+
+Without any configuration it pushes to `ghcr.io/<owner>/<repository>` using the workflow token.
+
+To use the action directly in your own jobs:
 
 ```yaml
 permissions:
@@ -29,48 +85,51 @@ permissions:
 steps:
   - uses: actions/checkout@v4
   - uses: onek8s/container-build-extension@v0
-    with:
-      image: ghcr.io/${{ github.repository }}
 ```
 
-Any other registry:
+To use another registry, pass `username`/`password` inputs, or set the `CONTAINER_REGISTRY*` variables as `env:`.
+If you already log in with another step (for example `azure/login` + `az acr login`, or `docker/login-action`), just set
+`registry` or `image`.
+
+### Azure Pipelines
+
+Install the extension, then do one of the following:
+
+**Variable group.** Create a variable group (*Pipelines → Library*), for example `container-registry`, with
+`CONTAINER_REGISTRY`, `CONTAINER_REGISTRY_USERNAME` and `CONTAINER_REGISTRY_PASSWORD` (mark it secret):
 
 ```yaml
-  - uses: onek8s/container-build-extension@v0
-    with:
-      image: myacr.azurecr.io/my-app
-      username: ${{ secrets.REGISTRY_USERNAME }}
-      password: ${{ secrets.REGISTRY_PASSWORD }}
+variables:
+  - group: container-registry
+
+steps:
+  - task: ContainerBuild@0
 ```
 
-If you already log in with another step (for example `azure/login` + `az acr login`, or `docker/login-action`), just omit `username`/`password`.
-
-## Azure Pipelines
-
-Install the extension, then:
+**Service connection.** Use a *Docker Registry* service connection: username/password, or Azure Container Registry with a
+service principal. It can be shared with several projects. The image name is derived from its registry:
 
 ```yaml
 steps:
   - task: ContainerBuild@0
     inputs:
-      image: myacr.azurecr.io/my-app
       containerRegistry: my-acr-connection
 ```
 
-`containerRegistry` is a *Docker Registry* service connection (username/password, or Azure Container Registry with a
-service principal). For workload identity federation / managed identity, log in with `AzureCLI@2` (`az acr login -n myacr`)
-in a previous step and omit `containerRegistry`.
+To apply this to every pipeline centrally, put the step (and the variable group) in a shared template and use
+`extends:` or `template:` from your pipelines.
+
+For workload identity federation or managed identity, log in with `AzureCLI@2` (`az acr login -n myacr`) in a previous
+step and set `registry` or `image`.
 
 Output variables are available as `$(<stepName>.digest)` etc. when the step has a `name:`.
 The SBOM is published automatically as the `sbom` pipeline artifact.
 
-On GitHub, upload the SBOM with:
+On GitHub (when using the action directly), upload the SBOM with:
 
 ```yaml
   - uses: onek8s/container-build-extension@v0
     id: build
-    with:
-      image: ghcr.io/${{ github.repository }}
   - uses: actions/upload-artifact@v4
     with:
       name: sbom
@@ -101,8 +160,9 @@ GitHub uses `kebab-case` names, Azure DevOps uses `camelCase` names.
 
 | GitHub | Azure DevOps | Default | Description |
 |---|---|---|---|
-| `image` | `image` | **required** | Image name including registry, e.g. `ghcr.io/owner/app`. Lower-cased automatically. |
-| `username` / `password` | `containerRegistry` | | Registry credentials. On GitHub, `ghcr.io` uses `github-token` automatically. If not set, an existing `docker login` is used. |
+| `image` | `image` | automatic | Image name, a name below the registry, or empty for [automatic naming](#image-naming). |
+| `registry` | `registry` | see [Image naming](#image-naming) | Registry (and namespace) for automatic image names. |
+| `username` / `password` | `containerRegistry` | | Registry credentials. Defaults to the [`CONTAINER_REGISTRY*` variables](#configure-the-registry-once); on GitHub, `ghcr.io` uses `github-token`. Otherwise an existing `docker login` is used. |
 | `tags` | `tags` | automatic | Comma or newline separated tags. |
 | `context` | `context` | `.` | Build context. |
 | `dockerfile` | `dockerfile` | `<context>/Dockerfile` | Dockerfile path. |

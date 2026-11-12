@@ -109,6 +109,69 @@ var exec = (command, args, options = {}) => new Promise((resolve2, reject) => {
 
 // src/core/inputs.ts
 var path = __toESM(require("node:path"));
+
+// src/core/registry.ts
+var VAR_REGISTRY = "CONTAINER_REGISTRY";
+var VAR_USERNAME = "CONTAINER_REGISTRY_USERNAME";
+var VAR_PASSWORD = "CONTAINER_REGISTRY_PASSWORD";
+function normalizeRegistry(value) {
+  let r = value.trim().toLowerCase().replace(/^[a-z]+:\/\//, "").replace(/\/+$/, "");
+  const [host, ...rest] = r.split("/");
+  if (["index.docker.io", "registry-1.docker.io", "registry.hub.docker.com"].includes(host)) {
+    r = ["docker.io", ...rest.filter((p, i) => !(i === 0 && p === "v1"))].join("/");
+  }
+  return r;
+}
+var registryHost = (registry) => normalizeRegistry(registry).split("/")[0];
+function sanitizeComponent(value) {
+  return value.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/[._-]{2,}/g, "-").replace(/^[._-]+|[._-]+$/g, "");
+}
+function hasRegistryHost(image) {
+  const first = image.split("/")[0];
+  return image.includes("/") && (first.includes(".") || first.includes(":") || first === "localhost");
+}
+function defaultImagePath(ctx, registry) {
+  const repo = ctx.repository ? sanitizeComponent(ctx.repository) : "";
+  if (!repo) return void 0;
+  if (registryHost(registry) === "docker.io") return repo;
+  const project = ctx.project ? sanitizeComponent(ctx.project) : "";
+  return project ? `${project}/${repo}` : repo;
+}
+function resolveRegistry(platform2) {
+  const value = platform2.getInput("registry") ?? platform2.getVariable(VAR_REGISTRY) ?? platform2.getDefaultRegistry();
+  return value ? normalizeRegistry(value) : void 0;
+}
+function resolveImage(platform2) {
+  const image = platform2.getInput("image");
+  const registry = resolveRegistry(platform2);
+  if (image) {
+    if (hasRegistryHost(image) || !registry) return image;
+    return `${registry}/${image.replace(/^\/+/, "")}`;
+  }
+  if (!registry) {
+    throw new Error(`Input 'image' is required when no registry is configured (input 'registry' or variable ${VAR_REGISTRY}).`);
+  }
+  const path5 = defaultImagePath(platform2.context, registry);
+  if (!path5) throw new Error("Cannot derive the image name from the repository; set input 'image'.");
+  if (registryHost(registry) === "docker.io" && !registry.includes("/")) {
+    throw new Error("Docker Hub needs a namespace: set registry to 'docker.io/<namespace>' or set input 'image'.");
+  }
+  return `${registry}/${path5}`;
+}
+function resolveCredentials(platform2, registry) {
+  const explicit = platform2.getCredentials(registry);
+  if (explicit) return explicit;
+  const configured = platform2.getVariable(VAR_REGISTRY);
+  const password = platform2.getVariable(VAR_PASSWORD);
+  if (password && configured && registryHost(configured) === registryHost(registry)) {
+    const username = platform2.getVariable(VAR_USERNAME);
+    if (!username) throw new Error(`${VAR_USERNAME} is required when ${VAR_PASSWORD} is set`);
+    return { registry: registryHost(configured), username, password };
+  }
+  return platform2.getFallbackCredentials?.(registry);
+}
+
+// src/core/inputs.ts
 var DEFAULT_TRIVY_VERSION = "0.76.2";
 var DEFAULT_SEVERITY = "CRITICAL,HIGH";
 var SEVERITIES = ["UNKNOWN", "LOW", "MEDIUM", "HIGH", "CRITICAL"];
@@ -143,8 +206,7 @@ function parseImage(image) {
 }
 function readInputs(platform2) {
   const { context: ctx } = platform2;
-  const image = platform2.getInput("image");
-  if (!image) throw new Error("Input 'image' is required");
+  const image = resolveImage(platform2);
   const { registry, repository } = parseImage(image);
   const context = path.resolve(ctx.workspace, platform2.getInput("context") ?? ".");
   const dockerfileInput = platform2.getInput("dockerfile");
@@ -541,7 +603,7 @@ async function run(platform2, exec2 = exec) {
     }
   }
   if (inputs.push) {
-    const creds = platform2.getCredentials(inputs.registry);
+    const creds = resolveCredentials(platform2, inputs.registry);
     if (creds) {
       platform2.setSecret(creds.password);
       platform2.info(`Logging in to ${creds.registry} as ${creds.username}`);
@@ -584,7 +646,10 @@ function escapeData(s) {
 var GitHubPlatform = class {
   constructor(env = process.env) {
     this.env = env;
+    const [owner, repo] = (env.GITHUB_REPOSITORY ?? "").split("/");
     this.context = {
+      project: owner || void 0,
+      repository: repo || void 0,
       sha: env.GITHUB_SHA,
       ref: env.GITHUB_REF,
       isPullRequest: ["pull_request", "pull_request_target"].includes(env.GITHUB_EVENT_NAME ?? ""),
@@ -600,18 +665,25 @@ var GitHubPlatform = class {
     const value = this.env[key]?.trim();
     return value ? value : void 0;
   }
+  getVariable(name) {
+    const value = this.env[name]?.trim();
+    return value ? value : void 0;
+  }
+  getDefaultRegistry() {
+    return "ghcr.io";
+  }
   getCredentials(registry) {
     const username = this.getInput("username");
     const password = this.getInput("password");
-    if (password) {
-      if (!username) throw new Error("Input 'username' is required when 'password' is set");
-      return { registry, username, password };
-    }
+    if (!password) return void 0;
+    if (!username) throw new Error("Input 'username' is required when 'password' is set");
+    return { registry, username, password };
+  }
+  /** Zero-config GitHub Container Registry: use the workflow token. */
+  getFallbackCredentials(registry) {
     const token = this.getInput("githubToken");
-    if (registry === "ghcr.io" && token) {
-      return { registry, username: username ?? this.env.GITHUB_ACTOR ?? "github-actions", password: token };
-    }
-    return void 0;
+    if (registry !== "ghcr.io" || !token) return void 0;
+    return { registry, username: this.getInput("username") ?? this.env.GITHUB_ACTOR ?? "github-actions", password: token };
   }
   debug(message) {
     process.stdout.write(`::debug::${escapeData(message)}${os.EOL}`);

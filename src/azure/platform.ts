@@ -18,6 +18,7 @@ export class AzurePlatform implements Platform {
   readonly name = 'Azure Pipelines';
   readonly context: BuildContext;
   private readonly endpointVars = new Map<string, string>();
+  private readonly secretVars = new Map<string, string>();
 
   constructor(private readonly env: NodeJS.ProcessEnv = process.env) {
     // Move service connection secrets out of the environment so child processes don't inherit them.
@@ -26,8 +27,16 @@ export class AzurePlatform implements Platform {
         this.endpointVars.set(key.toUpperCase(), env[key] ?? '');
         if (key.toUpperCase().startsWith('ENDPOINT_AUTH')) delete env[key];
       }
+      // The agent passes secret pipeline variables to tasks as SECRET_<NAME>
+      if (key.startsWith('SECRET_')) {
+        this.secretVars.set(key.substring('SECRET_'.length), env[key] ?? '');
+        delete env[key];
+      }
     }
+    const repo = env.BUILD_REPOSITORY_NAME?.split('/').pop();
     this.context = {
+      project: env.SYSTEM_TEAMPROJECT || undefined,
+      repository: repo || undefined,
       sha: env.BUILD_SOURCEVERSION,
       ref: env.BUILD_SOURCEBRANCH,
       isPullRequest: env.BUILD_REASON === 'PullRequest',
@@ -46,6 +55,23 @@ export class AzurePlatform implements Platform {
     const name = ['ENDPOINT', kind, id, key].filter(Boolean).join('_').toUpperCase();
     const value = this.endpointVars.get(name);
     return value ? value : undefined;
+  }
+
+  getVariable(name: string): string | undefined {
+    const key = name.replace(/[. ]/g, '_').toUpperCase();
+    const value = (this.env[key] ?? this.secretVars.get(key))?.trim();
+    return value ? value : undefined;
+  }
+
+  /** The registry of the selected service connection. */
+  getDefaultRegistry(): string | undefined {
+    const id = this.getInput('containerRegistry');
+    if (!id) return undefined;
+    return (
+      this.endpoint('AUTH_PARAMETER', id, 'loginServer') ??
+      this.endpoint('AUTH_PARAMETER', id, 'registry') ??
+      this.endpoint('URL', id)
+    );
   }
 
   getCredentials(registry: string): RegistryCredentials | undefined {

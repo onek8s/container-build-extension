@@ -1,5 +1,6 @@
 import * as path from 'node:path';
 import type { Platform } from './platform';
+import { resolveImage } from './registry';
 import type { SbomFormat } from './scan';
 
 export type PushMode = 'auto' | 'true' | 'false';
@@ -77,8 +78,7 @@ export function parseImage(image: string): { registry: string; repository: strin
 
 export function readInputs(platform: Platform): Inputs {
   const { context: ctx } = platform;
-  const image = platform.getInput('image');
-  if (!image) throw new Error("Input 'image' is required");
+  const image = resolveImage(platform);
   const { registry, repository } = parseImage(image);
 
   const context = path.resolve(ctx.workspace, platform.getInput('context') ?? '.');
