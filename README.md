@@ -323,9 +323,16 @@ npm run package:azure    # build the .vsix into dist-azure/
 
 `dist/index.js` (used by the GitHub Action) is committed and CI checks it is up to date, so run `npm run build` before committing.
 
+### Azure DevOps end-to-end tests
+
+CI simulates the Azure Pipelines agent on every PR. With an Azure DevOps test organization configured, it also
+publishes a private dev build of the extension and runs [test/azure-devops/e2e.yml](test/azure-devops/e2e.yml) on real
+agents, authenticated with GitHub OIDC (no stored secrets). See [docs/azure-devops-e2e.md](docs/azure-devops-e2e.md).
+
 ### Releasing
 
 1. Bump `version` in `package.json` and run `npm run build` (syncs the Azure task and extension versions). Merge to `main`.
 2. Run the **Release** workflow on `main` (*Actions → Release → Run workflow*), or push a tag `vX.Y.Z`.
    The workflow creates the tag and a GitHub release with the `.vsix`, moves the `vX` major tag for the action, and
-   publishes to the Visual Studio Marketplace if the `AZURE_DEVOPS_MARKETPLACE_TOKEN` secret is configured.
+   publishes to the Visual Studio Marketplace with GitHub OIDC when `AZURE_DEVOPS_CLIENT_ID` is set
+   (see [docs/azure-devops-e2e.md](docs/azure-devops-e2e.md)).
