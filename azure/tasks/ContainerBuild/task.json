@@ -178,6 +178,15 @@
       "visibleRule": "scan = true"
     },
     {
+      "name": "bypassOnRerun",
+      "type": "boolean",
+      "label": "Accept findings when a failed job is re-run",
+      "defaultValue": "true",
+      "required": false,
+      "groupName": "scan",
+      "helpMarkDown": "When a failed job is re-run (\"Rerun failed jobs\"), vulnerabilities and safe-chain's minimum package age are reported as warnings instead of failing the build. Malware is always blocked."
+    },
+    {
       "name": "trivyVersion",
       "type": "string",
       "label": "Trivy version",

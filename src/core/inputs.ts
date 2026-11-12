@@ -24,6 +24,8 @@ export interface Inputs {
   sbom: boolean;
   sbomFormat: SbomFormat;
   safeChain: boolean;
+  /** Re-run of a failed job: vulnerabilities and too-new packages do not fail the build. */
+  rerunBypass: boolean;
 }
 
 export const DEFAULT_TRIVY_VERSION = '0.76.2';
@@ -122,6 +124,7 @@ export function readInputs(platform: Platform, machine?: MachineSettings): Input
     sbom: parseBool(platform.getInput('sbom'), true, 'sbom'),
     sbomFormat,
     safeChain: parseBool(platform.getInput('safeChain'), true, 'safeChain'),
+    rerunBypass: parseBool(platform.getInput('bypassOnRerun'), true, 'bypassOnRerun') && (ctx.attempt ?? 1) > 1,
     trivyImage: trivyVersion.includes('/') ? trivyVersion : `ghcr.io/aquasecurity/trivy:${trivyVersion.replace(/^v/, '')}`,
   };
 }

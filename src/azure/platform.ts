@@ -43,6 +43,7 @@ export class AzurePlatform implements Platform {
     this.context = {
       project: env.SYSTEM_TEAMPROJECT || undefined,
       repository: repo || undefined,
+      attempt: Number(env.SYSTEM_JOBATTEMPT) || undefined,
       sha: env.BUILD_SOURCEVERSION,
       ref: env.BUILD_SOURCEBRANCH,
       isPullRequest: env.BUILD_REASON === 'PullRequest',

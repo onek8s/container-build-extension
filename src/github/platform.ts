@@ -24,6 +24,7 @@ export class GitHubPlatform implements Platform {
     this.context = {
       project: owner || undefined,
       repository: repo || undefined,
+      attempt: Number(env.GITHUB_RUN_ATTEMPT) || undefined,
       sha: env.GITHUB_SHA,
       ref: env.GITHUB_REF,
       isPullRequest: ['pull_request', 'pull_request_target'].includes(env.GITHUB_EVENT_NAME ?? ''),

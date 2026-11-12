@@ -43,7 +43,9 @@ async function prepareBuild(
     return { ...plain, safeChain: 'unsupported agent' };
   }
 
-  const result = instrumentDockerfile(fs.readFileSync(inputs.dockerfile, 'utf8'));
+  const result = instrumentDockerfile(fs.readFileSync(inputs.dockerfile, 'utf8'), {
+    skipMinimumPackageAge: inputs.rerunBypass,
+  });
   if (result.wrapped === 0) {
     platform.info(`safe-chain: no RUN instructions to protect${result.reason ? ` (${result.reason})` : ''}.`);
     return { ...plain, safeChain: 'nothing to protect' };
@@ -90,6 +92,13 @@ export async function run(platform: Platform, exec: Exec = defaultExec): Promise
 
   const result: RunResult = { imageRefs, pushed: false };
   const summary: string[] = [`### Container build: \`${inputs.repository}\``, '', `Tags: ${tags.map((t) => `\`${t}\``).join(', ')}`, ''];
+  if (inputs.rerunBypass) {
+    const msg =
+      `Re-run (attempt ${ctx.attempt}): vulnerabilities found by the scan and safe-chain's minimum package age ` +
+      'do not fail this build. Malware is still blocked.';
+    platform.warning(msg);
+    summary.push(`⚠️ ${msg}`, '');
+  }
 
   const build = await prepareBuild(platform, exec, inputs);
   await group(platform, 'Build image', () =>
@@ -136,11 +145,11 @@ export async function run(platform: Platform, exec: Exec = defaultExec): Promise
 
         if (scan.vulnerabilities.length > 0) {
           const msg = `Found ${scan.vulnerabilities.length} vulnerabilities with severity ${inputs.severity}`;
-          if (inputs.failOnVulnerabilities) {
+          if (inputs.failOnVulnerabilities && !inputs.rerunBypass) {
             platform.addSummary(summary.join('\n'));
             throw new Error(`${msg}. Image was not pushed. Fix them, add them to .trivyignore, or set failOnVulnerabilities to false.`);
           }
-          platform.warning(msg);
+          platform.warning(inputs.rerunBypass ? `${msg}; accepted because this is a re-run` : msg);
         } else {
           platform.info('No vulnerabilities found.');
         }

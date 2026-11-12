@@ -64,6 +64,22 @@ describe('run', () => {
     expect(p.summary).toContain('CVE-1');
   });
 
+  it('accepts vulnerabilities on a re-run and pushes', async () => {
+    const { calls, exec, ctx } = setup([vuln]);
+    const p = new FakePlatform({ image: 'reg.io/app', safeChain: 'false' }, { ...ctx, attempt: 2 });
+    const r = await run(p, exec);
+    expect(r.pushed).toBe(true);
+    expect(calls.some((c) => c.args[0] === 'push')).toBe(true);
+    expect(p.logs.some((l) => l.startsWith('WARN Re-run (attempt 2)'))).toBe(true);
+    expect(p.summary).toContain('Re-run (attempt 2)');
+  });
+
+  it('still fails on a re-run when bypassOnRerun is false', async () => {
+    const { exec, ctx } = setup([vuln]);
+    const p = new FakePlatform({ image: 'reg.io/app', safeChain: 'false', bypassOnRerun: 'false' }, { ...ctx, attempt: 3 });
+    await expect(run(p, exec)).rejects.toThrow(/vulnerabilities/);
+  });
+
   it('only warns when failOnVulnerabilities is false', async () => {
     const { calls, exec, ctx } = setup([vuln]);
     const p = new FakePlatform({ image: 'reg.io/app', failOnVulnerabilities: 'false', safeChain: 'false' }, ctx);
