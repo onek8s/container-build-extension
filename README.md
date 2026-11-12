@@ -222,7 +222,7 @@ npm run package:azure    # build the .vsix into dist-azure/
 
 ### Releasing
 
-1. Bump `version` in `package.json` and run `npm run build` (syncs the Azure task and extension versions).
-2. Merge to `main`, then push a tag `vX.Y.Z`. The release workflow creates a GitHub release with the `.vsix`,
-   moves the `vX` major tag for the action, and publishes to the Visual Studio Marketplace if the
-   `AZURE_DEVOPS_MARKETPLACE_TOKEN` secret is configured.
+1. Bump `version` in `package.json` and run `npm run build` (syncs the Azure task and extension versions). Merge to `main`.
+2. Run the **Release** workflow on `main` (*Actions → Release → Run workflow*), or push a tag `vX.Y.Z`.
+   The workflow creates the tag and a GitHub release with the `.vsix`, moves the `vX` major tag for the action, and
+   publishes to the Visual Studio Marketplace if the `AZURE_DEVOPS_MARKETPLACE_TOKEN` secret is configured.

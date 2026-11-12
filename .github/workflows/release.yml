@@ -1,8 +1,11 @@
 name: Release
 
+# Release by pushing a vX.Y.Z tag, or with "Run workflow" on main, which tags the
+# version from package.json for you.
 on:
   push:
     tags: ["v*.*.*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -15,10 +18,25 @@ jobs:
       - uses: ./.github/actions/setup
       - run: npm run check
 
-      - name: Verify tag matches package.json version
+      - name: Determine and create tag
+        id: tag
         run: |
+          set -euo pipefail
           version=$(node -p "require('./package.json').version")
-          [[ "${GITHUB_REF_NAME}" == "v${version}" ]] || { echo "::error::Tag ${GITHUB_REF_NAME} does not match package.json version ${version}"; exit 1; }
+          tag="v${version}"
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            [[ "$GITHUB_REF" == "refs/heads/main" ]] || { echo "::error::Run the release from main"; exit 1; }
+            if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null; then
+              echo "::error::Tag ${tag} already exists. Bump the version in package.json first."; exit 1
+            fi
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$tag" -m "$tag" "$GITHUB_SHA"
+            git push origin "refs/tags/${tag}"
+          else
+            [[ "$GITHUB_REF_NAME" == "$tag" ]] || { echo "::error::Tag ${GITHUB_REF_NAME} does not match package.json version ${version}"; exit 1; }
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
 
       - name: Package Azure DevOps extension
         run: npx tfx extension create --root azure --manifest-globs vss-extension.json --output-path dist-azure
@@ -26,11 +44,14 @@ jobs:
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist-azure/*.vsix --generate-notes --verify-tag
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: gh release create "$TAG" dist-azure/*.vsix --generate-notes --verify-tag
 
       - name: Move major version tag
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          major="${GITHUB_REF_NAME%%.*}"
+          major="${TAG%%.*}"
           git tag -f "$major" "$GITHUB_SHA"
           git push -f origin "refs/tags/$major"
 
