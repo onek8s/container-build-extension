@@ -4,6 +4,7 @@ import { Docker } from './docker';
 import { exec as defaultExec, type Exec } from './exec';
 import { readInputs, type Inputs } from './inputs';
 import type { Platform } from './platform';
+import { resolveCredentials } from './registry';
 import { instrumentDockerfile, prepareSafeChain, SAFE_CHAIN_CONTEXT } from './safechain';
 import { summaryMarkdown, Trivy, type ScanResult } from './scan';
 import { resolveTags } from './tags';
@@ -146,7 +147,7 @@ export async function run(platform: Platform, exec: Exec = defaultExec): Promise
   }
 
   if (inputs.push) {
-    const creds = platform.getCredentials(inputs.registry);
+    const creds = resolveCredentials(platform, inputs.registry);
     if (creds) {
       platform.setSecret(creds.password);
       platform.info(`Logging in to ${creds.registry} as ${creds.username}`);

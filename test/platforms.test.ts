@@ -23,14 +23,22 @@ describe('GitHubPlatform', () => {
 
   it('uses github token for ghcr.io only', () => {
     const p = new GitHubPlatform({ 'INPUT_GITHUB-TOKEN': 'tok', GITHUB_ACTOR: 'me' });
-    expect(p.getCredentials('ghcr.io')).toEqual({ registry: 'ghcr.io', username: 'me', password: 'tok' });
-    expect(p.getCredentials('docker.io')).toBeUndefined();
+    expect(p.getCredentials('ghcr.io')).toBeUndefined();
+    expect(p.getFallbackCredentials('ghcr.io')).toEqual({ registry: 'ghcr.io', username: 'me', password: 'tok' });
+    expect(p.getFallbackCredentials('docker.io')).toBeUndefined();
   });
 
   it('prefers explicit username/password', () => {
     const p = new GitHubPlatform({ INPUT_USERNAME: 'u', INPUT_PASSWORD: 'p', 'INPUT_GITHUB-TOKEN': 'tok' });
     expect(p.getCredentials('ghcr.io')).toEqual({ registry: 'ghcr.io', username: 'u', password: 'p' });
     expect(() => new GitHubPlatform({ INPUT_PASSWORD: 'p' }).getCredentials('x.io')).toThrow(/username/);
+  });
+
+  it('derives naming context from GITHUB_REPOSITORY and reads env variables', () => {
+    const p = new GitHubPlatform({ GITHUB_REPOSITORY: 'OneK8s/My_App', CONTAINER_REGISTRY: ' acr.io ' });
+    expect(p.context).toMatchObject({ project: 'OneK8s', repository: 'My_App' });
+    expect(p.getVariable('CONTAINER_REGISTRY')).toBe('acr.io');
+    expect(p.getDefaultRegistry()).toBe('ghcr.io');
   });
 
   it('writes outputs to GITHUB_OUTPUT', () => {
@@ -76,6 +84,30 @@ describe('AzurePlatform', () => {
       [`ENDPOINT_DATA_${ID}_REGISTRYTYPE`]: 'ACR',
     });
     expect(() => p.getCredentials('x.azurecr.io')).toThrow(/az acr login/);
+  });
+
+  it('reads plain and secret variables and the naming context', () => {
+    const env: NodeJS.ProcessEnv = {
+      CONTAINER_REGISTRY: 'myacr.azurecr.io',
+      SECRET_CONTAINER_REGISTRY_PASSWORD: 'pw',
+      SYSTEM_TEAMPROJECT: 'Web Shop',
+      BUILD_REPOSITORY_NAME: 'owner/Front.End',
+    };
+    const p = new AzurePlatform(env);
+    expect(p.getVariable('CONTAINER_REGISTRY')).toBe('myacr.azurecr.io');
+    expect(p.getVariable('CONTAINER_REGISTRY_PASSWORD')).toBe('pw');
+    expect(env.SECRET_CONTAINER_REGISTRY_PASSWORD).toBeUndefined();
+    expect(p.context).toMatchObject({ project: 'Web Shop', repository: 'Front.End' });
+  });
+
+  it('uses the service connection registry as default registry', () => {
+    const p = new AzurePlatform({
+      INPUT_CONTAINERREGISTRY: id,
+      [`ENDPOINT_URL_${ID}`]: 'https://index.docker.io/v1/',
+      [`ENDPOINT_AUTH_PARAMETER_${ID}_LOGINSERVER`]: 'myacr.azurecr.io',
+    });
+    expect(p.getDefaultRegistry()).toBe('myacr.azurecr.io');
+    expect(new AzurePlatform({}).getDefaultRegistry()).toBeUndefined();
   });
 
   it('maps context and escapes logging commands', () => {

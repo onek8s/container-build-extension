@@ -13,7 +13,7 @@
     "Patch": 0
   },
   "minimumAgentVersion": "3.232.1",
-  "instanceNameFormat": "Container build $(image)",
+  "instanceNameFormat": "Container build",
   "groups": [
     {
       "name": "build",
@@ -36,15 +36,22 @@
       "name": "image",
       "type": "string",
       "label": "Image",
-      "required": true,
-      "helpMarkDown": "Image name including registry, e.g. `myacr.azurecr.io/app`."
+      "required": false,
+      "helpMarkDown": "Image name, e.g. `myacr.azurecr.io/app`, or a name below the registry (e.g. `team/app`). Default: `<registry>/<project>/<repository>`."
     },
     {
       "name": "containerRegistry",
       "type": "connectedService:dockerregistry",
       "label": "Container registry service connection",
       "required": false,
-      "helpMarkDown": "Docker Registry service connection used for push. Leave empty if already logged in."
+      "helpMarkDown": "Docker Registry service connection used for push; its registry is also the default for automatic image names. Leave empty to use the `CONTAINER_REGISTRY`, `CONTAINER_REGISTRY_USERNAME` and `CONTAINER_REGISTRY_PASSWORD` variables (e.g. from a variable group) or an existing docker login."
+    },
+    {
+      "name": "registry",
+      "type": "string",
+      "label": "Registry",
+      "required": false,
+      "helpMarkDown": "Registry (and optional namespace) used for automatic image names, e.g. `myacr.azurecr.io`. Default: the `CONTAINER_REGISTRY` variable, else the service connection's registry."
     },
     {
       "name": "tags",

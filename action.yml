@@ -7,8 +7,11 @@ branding:
 
 inputs:
   image:
-    description: "Image name including registry, e.g. ghcr.io/owner/app or myacr.azurecr.io/app. The only required input."
-    required: true
+    description: "Image name, e.g. ghcr.io/owner/app, or a name below the registry (e.g. team/app). Default: <registry>/<owner>/<repository>."
+    required: false
+  registry:
+    description: "Registry (and optional namespace) used for automatic image names. Default: CONTAINER_REGISTRY environment variable, else ghcr.io."
+    required: false
   tags:
     description: "Comma or newline separated tags. Default: short SHA plus 'latest' (main/master), branch name, 'pr-<n>' or git tag."
     required: false
@@ -30,7 +33,7 @@ inputs:
     required: false
     default: "auto"
   username:
-    description: "Registry username. Not needed for ghcr.io (uses github-token) or when already logged in."
+    description: "Registry username. Not needed for ghcr.io (uses github-token), with CONTAINER_REGISTRY_USERNAME/PASSWORD environment variables, or when already logged in."
     required: false
   password:
     description: "Registry password or token."
